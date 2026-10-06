@@ -57,8 +57,9 @@ NvResult NvMap::Handle::Alloc(Flags pFlags, u32 pAlign, u8 pKind, u64 pAddress,
 
 NvResult NvMap::Handle::Duplicate(bool internal_session) {
     std::scoped_lock lock(mutex);
-    // Unallocated handles cannot be duplicated as duplication requires memory accounting (in HOS)
-    if (!allocated) [[unlikely]] {
+    // Unallocated handles cannot be duplicated as duplication requires memory accounting (in HOS).
+    // Guest references must not revive mappings belonging to a closed session.
+    if (!allocated || (!internal_session && session_closed)) [[unlikely]] {
         return NvResult::BadValue;
     }
 
@@ -191,6 +192,12 @@ DAddr NvMap::PinHandle(NvMap::Handle::Id handle, bool low_area_pin) {
     }
 
     std::scoped_lock lock(handle_description->mutex);
+    // Live internal buffers can outlive the last guest reference. A closed session,
+    // however, has already revoked its mappings and must not acquire new pins.
+    if (handle_description->session_closed ||
+        (handle_description->dupes <= 0 && handle_description->internal_dupes <= 0)) {
+        return 0;
+    }
     if (low_area_pin && handle_description->aligned_size > std::numeric_limits<u32>::max()) {
         LOG_ERROR(Service_NVDRV, "Handle is too large for the Host1x address space");
         return 0;
@@ -266,15 +273,20 @@ void NvMap::UnpinHandle(Handle::Id handle) {
     }
 
     std::scoped_lock lock(handle_description->mutex);
-    if (--handle_description->pins < 0) {
+    if (handle_description->pins <= 0) {
         LOG_WARNING(Service_NVDRV, "Pin count imbalance detected!");
-    } else if (!handle_description->pins) {
-        std::scoped_lock queueLock(unmap_queue_lock);
-
-        // Add to the unmap queue allowing this handle's memory to be freed if needed
-        unmap_queue.push_back(handle_description);
-        handle_description->unmap_queue_entry = std::prev(unmap_queue.end());
+        return;
     }
+    // Guest teardown can revoke a mapping before an internal buffer releases its
+    // pin. Balance that reference without caching the already unmapped handle.
+    if (--handle_description->pins != 0 || handle_description->d_address == 0) {
+        return;
+    }
+    std::scoped_lock queueLock(unmap_queue_lock);
+
+    // Add to the unmap queue allowing this handle's memory to be freed if needed
+    unmap_queue.push_back(handle_description);
+    handle_description->unmap_queue_entry = std::prev(unmap_queue.end());
 }
 
 void NvMap::DuplicateHandle(Handle::Id handle, bool internal_session) {
@@ -305,15 +317,15 @@ std::optional<NvMap::FreeInfo> NvMap::FreeHandle(Handle::Id handle, bool interna
         } else {
             if (--handle_description->dupes < 0) {
                 LOG_WARNING(Service_NVDRV, "User duplicate count imbalance detected!");
-            } else if (handle_description->dupes == 0) {
-                // Force unmap the handle
-                if (handle_description->d_address) {
-                    std::scoped_lock queueLock(unmap_queue_lock);
-                    UnmapHandle(*handle_description);
-                }
-
-                handle_description->pins = 0;
             }
+        }
+
+        // A live display buffer still owns this memory after the last guest free.
+        // Unmap only after all references are gone; session closure revokes it separately.
+        if (handle_description->dupes == 0 && handle_description->internal_dupes == 0 &&
+            handle_description->d_address) {
+            std::scoped_lock queue_lock(unmap_queue_lock);
+            UnmapHandle(*handle_description);
         }
 
         // Try to remove the shared ptr to the handle from the map, if nothing else is using the
@@ -352,13 +364,20 @@ void NvMap::UnmapAllHandles(NvCore::SessionId session_id) {
     }();
 
     for (auto& [id, handle] : handles_copy) {
-        {
-            std::scoped_lock lk{handle->mutex};
-            if (handle->session_id.id != session_id.id || handle->dupes <= 0) {
-                continue;
-            }
+        std::scoped_lock lk{handle->mutex};
+        if (handle->session_id.id != session_id.id) {
+            continue;
         }
-        FreeHandle(id, false);
+        // Closing the last session releases all guest references, not just one.
+        // Revoke mappings before its mapper and process address space are destroyed,
+        // retaining pin counts for internal buffers that are released afterwards.
+        handle->dupes = 0;
+        handle->session_closed = true;
+        if (handle->d_address) {
+            std::scoped_lock queue_lock(unmap_queue_lock);
+            UnmapHandle(*handle);
+        }
+        TryRemoveHandle(*handle);
     }
 }
 

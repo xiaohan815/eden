@@ -215,7 +215,48 @@ Qt 应用和测试构建成功，79 个相关测试、12,473 条断言通过。�
 `nvmap-low-area-fixed-tests.txt`。尚未在游戏中观察到低地址区耗尽，分屏颜色、
 实际帧节奏和长期稳定性仍未完成验证；没有新的帧率提升测量。
 
-### 锁屏时的无按键启动回归
+### NvMap 与显示缓冲的生命周期
+
+在 `f13b75581b` 构建的实际游戏退出路径上，通过 LLDB 捕获了
+`Pin count imbalance detected!`：`GraphicBuffer` 析构从
+`HardwareComposer` / `SurfaceFlinger` 的清理路径调用 `UnpinHandle`。
+当时句柄的 guest 引用为 0、内部引用为 1，映射已经撤销，pin 计数为 −1。
+此前最后一次 guest 释放会把所有 pin 直接清零，后续内部缓冲仍释放其拥有的
+pin，因此出现不平衡。调用栈和字段保存在本机
+`.cache/diagnostics/nvmap-pin-imbalance-backtrace.txt` 与
+`nvmap-pin-imbalance-fields.txt`。
+
+现在正常 guest 释放会保留仍由显示缓冲持有的映射，最后一份内部引用释放后
+再撤销映射。这也保留了通过 FromId 重新获取活跃显示缓冲的行为。
+关闭最后一个驱动会话时则撤销该会话的全部 guest 引用和映射，保留内部用户
+尚未释放的 pin 计数；后续解除固定只平衡计数，不将已撤销的映射加入回收队列。
+关闭会话后禁止新增 pin 或 guest 引用，避免会话 ID 重用后重新映射旧进程内存。
+真正多余的解除固定仍记录警告，但不会将计数减为负数或重复入队。
+
+另外，`GraphicBuffer` 只释放自己成功取得的 pin；固定失败时，析构不再消耗
+其他缓冲拥有的引用。会话关闭原先只释放一份 guest 引用，多份引用会残留映射；
+现在关闭时一次撤销所有 guest 引用。相关错误分别由真实 NvMap / Host1x、
+会话关闭后重新打开，以及真实 `GraphicBuffer` 的生命周期用例复现。
+正常 guest 释放的用例还确认内部缓冲数据仍有效、FromId 可重新取得句柄，
+最后一次释放会移除映射与回收队列记录。
+
+Qt 应用和测试构建成功，85 个相关测试、12,655 条断言通过。
+故障与最终结果保存在本机 `.cache/diagnostics/nvmap-lifetime-red-tests.txt`、
+`nvmap-session-and-buffer-red-tests.txt`、`nvmap-live-and-revocation-red-tests.txt`
+及 `nvmap-lifetime-complete-tests.txt`。这些结果验证引用和映射的生命周期，
+没有新的性能改善测量，不能代替分屏颜色、实际帧节奏或长期稳定性验证。
+
+修复候选使用独立配置无输入运行《双人成行》约 130 秒，识别 M5 Max、
+16 GiB 缓存预算和 VideoToolbox 解码。随后一次 SIGTERM 经正常关闭路径退出，
+退出码为 0，没有残留进程；日志中的 pin / duplicate 计数异常均为零，
+未出现未映射设备访问或地址分配失败。已知的两个 Vulkan 能力错误、
+`Force stopping EmuThread` 和 `BufferQueue has been abandoned` 仍存在。
+本次未观察标题、分屏画面，也未进入存档或测量实际显示间隔。
+结果保存在本机 `.cache/diagnostics/nvmap-lifetime-locked-smoke-eden_log.txt`
+与 `nvmap-lifetime-smoke-summary.txt`。正式配置的渲染、输入和语言设置
+与修复前备份比对一致。
+
+### 锁屏时的无按键启动回归（生命周期修复前）
 
 `929a8cf15f` 构建使用独立配置启动《双人成行》约 128 秒，没有发送测试输入。
 更新、M5 Max 与 16 GiB 缓存预算正常识别，线程采样观察到客体 CPU 执行、

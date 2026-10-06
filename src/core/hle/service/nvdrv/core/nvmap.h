@@ -54,7 +54,7 @@ public:
         using Id = u32;
         Id id; //!< A globally unique identifier for this handle
 
-        s64 pins{};
+        s64 pins{}; //!< Outstanding pin references, including pins of a revoked mapping
         u32 pin_virt_address{};
         std::optional<typename std::list<std::shared_ptr<Handle>>::iterator> unmap_queue_entry{};
 
@@ -74,6 +74,7 @@ public:
 
         u8 kind{};        //!< Used for memory compression
         bool allocated{}; //!< If the handle has been allocated with `Alloc`
+        bool session_closed{}; //!< Its owning session has revoked all guest mappings
         bool in_heap{};
         NvCore::SessionId session_id{};
 
@@ -139,7 +140,7 @@ public:
 
     /**
      * @brief When this has been called an equal number of times to `PinHandle` for the supplied
-     * handle it will be added to a list of handles to be freed when necessary
+     * handle, a still-mapped handle will be added to a list to be freed when necessary
      */
     void UnpinHandle(Handle::Id handle);
 

@@ -110,6 +110,7 @@ public:
 
 private:
     Service::Nvidia::NvCore::NvMap* m_nvmap{};
+    bool m_pinned{};
 };
 
 } // namespace Service::android

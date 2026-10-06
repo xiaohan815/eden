@@ -18,6 +18,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
+#include "core/hle/service/nvnflinger/ui/graphic_buffer.h"
 #include "core/memory.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
@@ -545,4 +546,176 @@ TEST_CASE("NvMap low-area pin rejects sizes beyond its address width",
     CHECK(handle->pin_virt_address == 0);
     CHECK_FALSE(handle->unmap_queue_entry.has_value());
     CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(0).has_value());
+}
+
+TEST_CASE("NvMap releases outstanding pins after session mapping revocation",
+          "[gpu_memory][nvmap][nvmap_lifetime]") {
+    const bool low_area = GENERATE(false, true);
+    const int pin_count = GENERATE(1, 2);
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    nvmap.DuplicateHandle(handle->id, true);
+    for (int i = 0; i < pin_count; ++i) {
+        REQUIRE(nvmap.PinHandle(handle->id, low_area) != 0);
+    }
+    const DAddr device_address = handle->d_address;
+    const GPUVAddr low_address = handle->pin_virt_address;
+    nvmap.UnmapAllHandles(memory.session);
+    CHECK(handle->dupes == 0);
+    CHECK(handle->internal_dupes == 1);
+    CHECK(handle->pins == pin_count);
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK(memory.host1x.MemoryManager().Read<u8>(device_address) == 0);
+    if (low_area) {
+        CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(low_address).has_value());
+    }
+    for (int i = 0; i < pin_count; ++i) {
+        nvmap.UnpinHandle(handle->id);
+        CHECK(handle->pins == pin_count - i - 1);
+        CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    }
+    REQUIRE(nvmap.FreeHandle(handle->id, true).has_value());
+    CHECK(nvmap.GetHandle(handle->id) == nullptr);
+}
+
+TEST_CASE("NvMap rejects new pins and guest duplicates after session revocation",
+          "[gpu_memory][nvmap][nvmap_lifetime]") {
+    const bool low_area = GENERATE(false, true);
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    nvmap.DuplicateHandle(handle->id, true);
+    nvmap.UnmapAllHandles(memory.session);
+    CHECK(nvmap.PinHandle(handle->id, low_area) == 0);
+    CHECK(handle->pins == 0);
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK(handle->Duplicate(false) == Service::Nvidia::NvResult::BadValue);
+    nvmap.FreeHandle(handle->id, true);
+}
+
+TEST_CASE("NvMap unmatched unpin does not corrupt later pin ownership",
+          "[gpu_memory][nvmap][nvmap_lifetime]") {
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    nvmap.UnpinHandle(handle->id);
+    CHECK(handle->pins == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    const DAddr address = nvmap.PinHandle(handle->id, false);
+    REQUIRE(address != 0);
+    CHECK(handle->pins == 1);
+    CHECK(memory.host1x.MemoryManager().Read<u8>(address) == 0x11);
+    nvmap.UnpinHandle(handle->id);
+    CHECK(handle->pins == 0);
+    REQUIRE(handle->unmap_queue_entry.has_value());
+    const auto queue_entry = handle->unmap_queue_entry;
+    nvmap.UnpinHandle(handle->id);
+    CHECK(handle->pins == 0);
+    CHECK(handle->unmap_queue_entry == queue_entry);
+}
+
+TEST_CASE("NvMap session close revokes every guest reference before session reuse",
+          "[gpu_memory][nvmap][nvmap_lifetime][nvmap_session]") {
+    const bool internal_reference = GENERATE(false, true);
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    nvmap.DuplicateHandle(handle->id);
+    nvmap.DuplicateHandle(handle->id);
+    if (internal_reference) {
+        nvmap.DuplicateHandle(handle->id, true);
+    }
+    const GPUVAddr low_address = nvmap.PinHandle(handle->id, true);
+    REQUIRE(low_address != 0);
+    REQUIRE(handle->dupes == 3);
+    memory.core.CloseSession(memory.session);
+    // Leave the fixture with one open session, also exercising reuse of the closed ID.
+    const auto closed_session = memory.session;
+    memory.session = memory.core.OpenSession(&memory.process);
+    REQUIRE(memory.session.id == closed_session.id);
+    CHECK(handle->dupes == 0);
+    CHECK(handle->pins == 1);
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(low_address).has_value());
+    CHECK((nvmap.GetHandle(handle->id) != nullptr) == internal_reference);
+
+    auto replacement = memory.CreateHandle(PAGE, CPU_BASE + PAGE);
+    const DAddr replacement_address = nvmap.PinHandle(replacement->id, false);
+    REQUIRE(replacement_address != 0);
+    nvmap.UnpinHandle(handle->id);
+    if (internal_reference) {
+        CHECK(handle->pins == 0);
+        CHECK_FALSE(handle->unmap_queue_entry.has_value());
+        REQUIRE(nvmap.FreeHandle(handle->id, true).has_value());
+        CHECK(nvmap.GetHandle(handle->id) == nullptr);
+    }
+    CHECK(memory.host1x.MemoryManager().Read<u8>(replacement_address) == 0x22);
+    CHECK(replacement->pins == 1);
+    nvmap.UnpinHandle(replacement->id);
+}
+
+TEST_CASE("GraphicBuffer does not release another buffer's pin after pin failure",
+          "[gpu_memory][nvmap][nvmap_lifetime][graphic_buffer_pin]") {
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    auto description = std::make_shared<Service::android::NvGraphicBuffer>();
+    description->buffer_id = handle->id;
+    auto active = std::make_shared<Service::android::GraphicBuffer>(nvmap, description);
+    REQUIRE(handle->pins == 1);
+    REQUIRE(handle->internal_dupes == 1);
+    nvmap.UnmapAllHandles(memory.session);
+    {
+        Service::android::GraphicBuffer rejected{nvmap, description};
+        CHECK(handle->pins == 1);
+        CHECK(handle->internal_dupes == 2);
+        CHECK(handle->d_address == 0);
+    }
+    CHECK(handle->pins == 1);
+    CHECK(handle->internal_dupes == 1);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    active.reset();
+    CHECK(handle->pins == 0);
+    CHECK(handle->internal_dupes == 0);
+    CHECK(nvmap.GetHandle(handle->id) == nullptr);
+}
+
+TEST_CASE("NvMap guest free preserves mappings still owned by a live internal buffer",
+          "[gpu_memory][nvmap][nvmap_lifetime][nvmap_live]") {
+    const bool low_area = GENERATE(false, true);
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    nvmap.DuplicateHandle(handle->id, true);
+    const DAddr address = nvmap.PinHandle(handle->id, low_area);
+    REQUIRE(address != 0);
+    const DAddr device_address = handle->d_address;
+    REQUIRE(nvmap.FreeHandle(handle->id, false).has_value());
+    CHECK(handle->dupes == 0);
+    CHECK(handle->internal_dupes == 1);
+    CHECK(handle->pins == 1);
+    CHECK(handle->d_address == device_address);
+    CHECK(memory.host1x.MemoryManager().Read<u8>(device_address) == 0x11);
+
+    // FromId may reacquire a handle that is still owned by a live display buffer.
+    REQUIRE(handle->Duplicate(false) == Service::Nvidia::NvResult::Success);
+    REQUIRE(nvmap.PinHandle(handle->id, low_area) == address);
+    CHECK(handle->pins == 2);
+    REQUIRE(nvmap.FreeHandle(handle->id, false).has_value());
+    nvmap.UnpinHandle(handle->id);
+    nvmap.UnpinHandle(handle->id);
+    CHECK(handle->pins == 0);
+    REQUIRE(handle->unmap_queue_entry.has_value());
+    REQUIRE(nvmap.FreeHandle(handle->id, true).has_value());
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK(nvmap.GetHandle(handle->id) == nullptr);
 }
