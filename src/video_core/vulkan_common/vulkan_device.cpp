@@ -20,6 +20,7 @@
 #include <ranges>
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "video_core/vulkan_common/memory_budget.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -1450,9 +1451,17 @@ void Device::CollectPhysicalMemoryInfo() {
         device_access_memory += mem_properties.memoryHeaps[element].size;
     }
     if (is_integrated) {
-        const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
-        const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
-        device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
+        if (IsMoltenVK() && Settings::values.vram_usage_mode.GetValue() ==
+                                Settings::VramUsageMode::Aggressive) {
+            // Apple GPUs share system memory. Allow larger caches when the driver
+            // reports enough headroom, without overriding that budget with heap size.
+            device_access_memory =
+                CalculateAppleAggressiveMemoryBudget(device_access_memory, device_initial_usage);
+        } else {
+            const s64 available_memory = static_cast<s64>(device_access_memory - device_initial_usage);
+            const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
+            device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
+        }
     } else {
         const u64 reserve_memory = std::min<u64>(device_access_memory / 8, 1_GiB);
         device_access_memory -= reserve_memory;
@@ -1463,6 +1472,9 @@ void Device::CollectPhysicalMemoryInfo() {
             device_access_memory = std::min<u64>(device_access_memory, normal_memory + scaler_memory);
         }
     }
+    LOG_INFO(Render_Vulkan, "GPU cache budget: {} MiB (mode: {}, integrated: {})",
+             device_access_memory / 1_MiB,
+             Settings::CanonicalizeEnum(Settings::values.vram_usage_mode.GetValue()), is_integrated);
 }
 
 void Device::CollectToolingInfo() {
