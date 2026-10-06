@@ -344,6 +344,8 @@ target_link_libraries(video_core PRIVATE sirit::sirit)
 
 # Header-only stuff needed by all dependent targets
 target_link_libraries(video_core PUBLIC Vulkan::Headers Vulkan::UtilityHeaders GPUOpen::VulkanMemoryAllocator)
+# VK_KHR_portability_subset feature declarations are still guarded as beta by Vulkan headers.
+target_compile_definitions(video_core PUBLIC VK_ENABLE_BETA_EXTENSIONS)
 
 if (ENABLE_NSIGHT_AFTERMATH)
     if (NOT DEFINED ENV{NSIGHT_AFTERMATH_SDK})

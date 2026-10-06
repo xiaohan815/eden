@@ -132,7 +132,7 @@ VkPipelineInputAssemblyStateCreateInfo GetPipelineInputAssemblyStateCreateInfo(c
         .pNext = nullptr,
         .flags = 0,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .primitiveRestartEnable = device.IsMoltenVK() ? VK_TRUE : VK_FALSE,
+        .primitiveRestartEnable = VK_FALSE,
     };
 }
 constexpr VkPipelineViewportStateCreateInfo PIPELINE_VIEWPORT_STATE_CREATE_INFO{

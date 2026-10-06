@@ -662,8 +662,6 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .flags = 0,
         .topology = input_assembly_topology,
         .primitiveRestartEnable =
-        // MoltenVK/Metal always has primitive restart enabled and cannot disable it
-        device.IsMoltenVK() ? VK_TRUE :
         (dynamic.primitive_restart_enable != 0 &&
                 ((input_assembly_topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
                   device.IsTopologyListPrimitiveRestartSupported()) ||

@@ -138,6 +138,28 @@ MoltenVK 没有暴露游戏所需的几何流/transform feedback 能力；
 存档或程序导出加入源码提交。临时调试器、游戏资源补丁和 Unicorn 测试修改
 均已撤回。
 
+### MoltenVK 的 Vulkan 兼容性修复
+
+启用官方 Vulkan 验证层后，修复了强制要求的 portability subset 扩展未启用、
+不支持的 compute subgroup size、列表拓扑的 primitive restart、带采样 swizzle
+的 storage image view，以及未支持几何/细分着色器时仍使用对应同步阶段的问题。
+Storage image 使用独立、恒等分量映射的视图，并匹配请求的纹理维度。
+
+MoltenVK 使用 update-after-bind pool/layout 标志选择 Metal argument buffer 的
+较大采样器限制。本机普通每阶段限制为 16，所需管线使用 20–22 个采样器；
+after-bind 限制为 500000。描述符 binding flags 仍为零，GPU 使用中的描述符
+不能被修改。MoltenVK 同时使用已有的 queue-completion fence 路径；测试中
+原 timeline 路径报告的完成计数超前、命令缓冲区和描述符过早复用报错已消失。
+独立 timeline semaphore 探针通过，因此这不是对所有 MoltenVK timeline 使用
+均失效的判断。
+
+遮挡查询池在新建/复用时已整体 host reset，每次启动计数均分配新槽；
+移除渲染通道内多余的逐槽重置。最终验证已不再报告上述问题。
+普通运行的标题和主菜单约 30 FPS，停止返回列表后退出的进程状态为 0。
+验证层运行约 3 FPS，不能用于性能基准；纹理数值类型不匹配、部分同步 hazard、
+启动时零尺寸 swapchain 和不支持的 geometry streams 仍需处理。
+3D 颜色异常仍然存在，尚未验证可操作的双人关卡。
+
 ## M5 Max 的缓存预算与渲染设置
 
 本机为 40 核 GPU、128 GB 统一内存。Vulkan 经 MoltenVK 1.4.1 转换为 Metal，

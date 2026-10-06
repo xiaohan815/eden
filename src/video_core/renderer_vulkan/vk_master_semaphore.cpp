@@ -17,7 +17,9 @@ namespace Vulkan {
 constexpr u64 FENCE_RESERVE_SIZE = 8;
 
 MasterSemaphore::MasterSemaphore(const Device& device_) : device(device_) {
-    if (!device.HasTimelineSemaphore()) {
+    // Use queue-completion fences on MoltenVK. In the timeline path, completed ticks
+    // can run ahead of submitted work and let resource pools recycle in-use objects.
+    if (!device.HasTimelineSemaphore() || device.IsMoltenVK()) {
         static constexpr VkFenceCreateInfo fence_ci{
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = nullptr, .flags = 0};
         free_queue.resize(FENCE_RESERVE_SIZE);

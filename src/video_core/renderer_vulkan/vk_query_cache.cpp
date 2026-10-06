@@ -159,7 +159,9 @@ public:
         scheduler.Record([query_pool = current_query_pool,
                           query_index = current_bank_slot](vk::CommandBuffer cmdbuf) {
             const bool use_precise = Settings::IsGPULevelHigh();
-            cmdbuf.ResetQueryPool(query_pool, static_cast<u32>(query_index), 1);
+            // SamplesQueryBank resets the entire pool before reserving its slots. A slot
+            // is used once per bank cycle, so resetting it again here is unnecessary
+            // and would be invalid when the counter starts inside a render pass.
             cmdbuf.BeginQuery(query_pool, static_cast<u32>(query_index),
                               use_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
         });

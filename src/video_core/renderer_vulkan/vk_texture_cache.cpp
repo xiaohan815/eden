@@ -2275,17 +2275,26 @@ VkImageView ImageView::ColorView() {
 VkImageView ImageView::StorageView(Shader::TextureType texture_type,
                                    Shader::ImageFormat image_format) {
     if (image_handle) {
+        if (!storage_views) {
+            storage_views.emplace();
+        }
         if (image_format == Shader::ImageFormat::Typeless) {
-            return Handle(texture_type);
+            auto& view{storage_views->typeless[size_t(texture_type)]};
+            if (!view) {
+                const auto format_info =
+                    MaxwellToVK::SurfaceFormat(*device, FormatType::Optimal, true, format);
+                // Storage images must use identity component mapping. Sampled views can
+                // contain the guest texture swizzle and cannot be reused here.
+                view = MakeView(format_info.format, VK_IMAGE_ASPECT_COLOR_BIT, texture_type);
+            }
+            return *view;
         }
         const bool is_signed = image_format == Shader::ImageFormat::R8_SINT
             || image_format == Shader::ImageFormat::R16_SINT;
-        if (!storage_views)
-            storage_views.emplace();
         auto& views{is_signed ? storage_views->signeds : storage_views->unsigneds};
         auto& view{views[size_t(texture_type)]};
         if (!view)
-            view = MakeView(Format(image_format), VK_IMAGE_ASPECT_COLOR_BIT);
+            view = MakeView(Format(image_format), VK_IMAGE_ASPECT_COLOR_BIT, texture_type);
         return *view;
     }
     return VK_NULL_HANDLE;
@@ -2295,13 +2304,20 @@ bool ImageView::IsRescaled() const noexcept {
     return (*slot_images)[image_id].IsRescaled();
 }
 
-vk::ImageView ImageView::MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask) {
+vk::ImageView ImageView::MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask,
+                                std::optional<Shader::TextureType> texture_type) {
+    auto subresource_range = MakeSubresourceRange(aspect_mask, range);
+    if (texture_type == Shader::TextureType::Color1D ||
+        texture_type == Shader::TextureType::Color2D ||
+        texture_type == Shader::TextureType::Color2DRect) {
+        subresource_range.layerCount = 1;
+    }
     return device->GetLogical().CreateImageView({
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .image = image_handle,
-        .viewType = ImageViewType(type),
+        .viewType = texture_type ? ImageViewType(*texture_type) : ImageViewType(type),
         .format = vk_format,
         .components{
             .r = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -2309,7 +2325,7 @@ vk::ImageView ImageView::MakeView(VkFormat vk_format, VkImageAspectFlags aspect_
             .b = VK_COMPONENT_SWIZZLE_IDENTITY,
             .a = VK_COMPONENT_SWIZZLE_IDENTITY,
         },
-        .subresourceRange = MakeSubresourceRange(aspect_mask, range),
+        .subresourceRange = subresource_range,
     });
 }
 

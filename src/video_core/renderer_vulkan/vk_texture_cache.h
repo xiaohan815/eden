@@ -369,11 +369,14 @@ public:
 
 private:
     struct StorageViews {
+        std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> typeless;
         std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> signeds;
         std::array<vk::ImageView, Shader::NUM_TEXTURE_TYPES> unsigneds;
     };
 
-    [[nodiscard]] vk::ImageView MakeView(VkFormat vk_format, VkImageAspectFlags aspect_mask);
+    [[nodiscard]] vk::ImageView MakeView(
+        VkFormat vk_format, VkImageAspectFlags aspect_mask,
+        std::optional<Shader::TextureType> texture_type = std::nullopt);
 
     const Device* device = nullptr;
     const SlotVector<Image>* slot_images = nullptr;

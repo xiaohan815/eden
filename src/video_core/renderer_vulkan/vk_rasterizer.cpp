@@ -807,6 +807,13 @@ void RasterizerVulkan::WaitForIdle() {
         VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
         VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (!device.IsGeometryShaderSupported()) {
+        flags &= ~VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+    }
+    if (!device.IsTessellationShaderSupported()) {
+        flags &= ~(VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                   VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT);
+    }
     if (device.IsExtTransformFeedbackSupported()) {
         flags |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
     }

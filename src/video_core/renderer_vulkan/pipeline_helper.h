@@ -27,7 +27,8 @@ public:
     DescriptorLayoutBuilder(const Device& device_) : device{&device_} {}
 
     bool CanUsePushDescriptor() const noexcept {
-        return device->IsKhrPushDescriptorSupported() &&
+        return !device->UsesUpdateAfterBindDescriptorPools() &&
+               device->IsKhrPushDescriptorSupported() &&
                num_descriptors <= device->MaxPushDescriptors();
     }
 
@@ -36,8 +37,12 @@ public:
         if (bindings.empty()) {
             return nullptr;
         }
+        // The pool flag selects the larger descriptor limits. Binding flags remain zero,
+        // so sets still cannot be modified while the GPU is using them.
         const VkDescriptorSetLayoutCreateFlags flags =
-            use_push_descriptor ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0;
+            device->UsesUpdateAfterBindDescriptorPools()
+                ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
+                : use_push_descriptor ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0;
         return device->GetLogical().CreateDescriptorSetLayout({
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr,

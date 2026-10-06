@@ -49,6 +49,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
 
 // Define all features which may be used by the implementation and require an extension here.
 #define FOR_EACH_VK_FEATURE_EXT(FEATURE)                                                           \
+    FEATURE(KHR, PortabilitySubset, PORTABILITY_SUBSET, portability_subset)                         \
     FEATURE(EXT, CustomBorderColor, CUSTOM_BORDER_COLOR, custom_border_color)                      \
     FEATURE(EXT, DepthBiasControl, DEPTH_BIAS_CONTROL, depth_bias_control)                         \
     FEATURE(EXT, DepthClipControl, DEPTH_CLIP_CONTROL, depth_clip_control)                         \
@@ -392,6 +393,16 @@ public:
         return features.features.shaderStorageImageMultisample;
     }
 
+    /// Returns true if geometry shaders were enabled on the device.
+    bool IsGeometryShaderSupported() const {
+        return features2.features.geometryShader;
+    }
+
+    /// Returns true if tessellation shaders were enabled on the device.
+    bool IsTessellationShaderSupported() const {
+        return features2.features.tessellationShader;
+    }
+
     /// Returns true if the device warp size can potentially be bigger than guest's warp size.
     bool IsWarpSizePotentiallyBiggerThanGuest() const {
         return is_warp_potentially_bigger;
@@ -399,12 +410,22 @@ public:
 
     /// Returns true if the device can be forced to use the guest warp size.
     bool IsGuestWarpSizeSupported(VkShaderStageFlagBits stage) const {
-        return properties.subgroup_size_control.requiredSubgroupSizeStages & stage;
+        return extensions.subgroup_size_control &&
+               features.subgroup_size_control.subgroupSizeControl &&
+               (properties.subgroup_size_control.requiredSubgroupSizeStages & stage) != 0;
     }
 
     /// Returns true if the device supports the provided subgroup feature.
     bool IsSubgroupFeatureSupported(VkSubgroupFeatureFlagBits feature) const {
         return properties.subgroup_properties.supportedOperations & feature;
+    }
+
+    /// MoltenVK exposes its larger argument-buffer limits through update-after-bind pools.
+    bool UsesUpdateAfterBindDescriptorPools() const {
+        return IsMoltenVK() &&
+               features.descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind &&
+               properties.descriptor_indexing.maxPerStageDescriptorUpdateAfterBindSamplers >
+                   properties.properties.limits.maxPerStageDescriptorSamplers;
     }
 
     /// Returns the maximum number of push descriptors.
@@ -1008,6 +1029,7 @@ private:
     struct Properties {
         VkPhysicalDeviceDriverProperties driver{};
         VkPhysicalDeviceSubgroupProperties subgroup_properties{};
+        VkPhysicalDeviceDescriptorIndexingProperties descriptor_indexing{};
         VkPhysicalDeviceFloatControlsProperties float_controls{};
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
