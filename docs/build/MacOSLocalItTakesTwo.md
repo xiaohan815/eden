@@ -446,6 +446,38 @@ abandoned` 仍在。正式配置的渲染、双手柄、核心和系统设置与
 本轮 Mac 仍锁屏，上述检查未验证最新分屏画面或实际显示器呈现节奏，
 也没有新的游戏性能收益测量。
 
+### 纹理上传后的早期深度读取同步
+
+在 `e07cc0ad97` 上重新启用 Vulkan 同步验证，真实游戏启动记录四次
+`vkCmdBeginRenderPass` 的 READ_AFTER_WRITE 冲突：上传时的图像布局转换
+仅向晚期深度测试、颜色输出和计算着色器建立依赖，随后的早期深度
+附件读取没有得到同步。原上传屏障也未覆盖图形着色器中的采样及后续
+传输访问。
+
+现在 `CopyBufferToImage` 在上传前后覆盖所有命令阶段，并补充传输读写
+访问；屏障仍针对原有 mip/layer 范围。没有为每次上传增加设备空闲等待。
+这是修复缺失的 GPU 依赖，不能据此认定平均帧率提高。
+
+正式 Qt 应用构建成功，15 个着色器 / fence 测试、196 条断言通过。
+采用同一份独立 1×配置、没有发送游戏输入的 Vulkan 验证运行，旧版约
+136 秒记录四次深度冲突，修复版约 239 秒未记录同步冲突。线程采样
+确认修复版仍执行客体 CPU、Maxwell3D 绘制与异步呈现；两次均在一次
+SIGTERM 后退出码 0。验证层影响运行速度，此比较不作为性能基准。
+启动时的 0×0 交换链错误仍可复现，是待处理的另一条呈现生命周期路径；
+未使用片元输出及 3D 图像 layerCount 的验证警告也仍在。
+
+本机原始记录为 `.cache/diagnostics/current-vulkan-validation-baseline-eden_log.txt`、
+`texture-upload-sync-validation-fixed-eden_log.txt`、
+`texture-upload-sync-validation-fixed-sample.txt` 与 `texture-upload-sync-tests.txt`。
+关闭验证层后的正常构建无输入运行约 179 秒，采样仍观察到客体 CPU、
+Maxwell3D 绘制与异步呈现，一次 SIGTERM 后退出码 0，无残留进程。
+M5 Max 与 16 GiB 缓存预算正常识别，未记录新的映射、引用计数或地址
+分配错误；原有 geometryShader / shaderCullDistance 报错以及退出时的
+`Force stopping EmuThread` / `BufferQueue has been abandoned` 仍在。
+正常运行记录为 `texture-upload-sync-clean-startup-eden_log.txt`
+与 `texture-upload-sync-clean-startup-sample.txt`。
+本轮仍未验证最新双人分屏颜色或实际显示器帧节奏。
+
 ### 固定缓冲映射冲突与通道绑定
 
 普通固定缓冲映射原先只替换同起点的记录，部分重叠时会同时保留两个
