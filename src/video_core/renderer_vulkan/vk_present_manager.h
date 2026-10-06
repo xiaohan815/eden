@@ -101,6 +101,7 @@ private:
     const VkFormat frame_image_format;
     bool blit_supported;
     bool use_present_thread;
+    bool recreate_surface{};
     std::size_t image_count{};
 };
 

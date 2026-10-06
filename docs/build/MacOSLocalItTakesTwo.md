@@ -522,6 +522,47 @@ Maxwell3D 绘制与异步呈现；未记录 critical Vulkan 验证回调、同�
 Mac 锁屏期间没有发送游戏输入，最新分屏颜色、实际显示节奏、后续关卡及
 长时间游玩尚未验证，也没有新的卡顿改善测量。
 
+### Surface 丢失后的恢复与有限重试
+
+`e8746ca08c` 的呈现异常处理在同一帧循环重试，桌面平台还会复用丢失的
+`VkSurfaceKHR`。如果 surface 丢失发生在复制提交之后，`render_ready` 的等待
+已经入队，`present_done` 也已经被提交使用；再次处理该帧会复用尚未完成的
+命令缓冲区、重复等待二进制信号量，并再次提交同一个 fence。
+
+独立基线诊断在真实呈现成功后注入三次 `SURFACE_LOST`，记录三次重复处理
+已提交帧的尝试。诊断保护在重复录制/提交之前截住这些尝试，避免故意挂死
+GPU，因此不能将该次正常退出当作原版无保护时不会挂死的证明。
+另一组在获取图像前注入 64 次 `OUT_OF_DATE`，原循环在同一帧执行了
+65 次获取尝试，没有每帧上限。两组基线均使用异步呈现和 Vulkan 同步验证。
+
+现在复制提交前的 surface 丢失会回收该帧，下一帧再恢复 surface。
+复制已经提交后的呈现失败只记录恢复需求，不再重新提交或丢弃同一帧。
+恢复时先完成旧交换链的 GPU 引用并释放交换链，再替换 surface；桌面平台
+也执行这条恢复路径。获取返回 `OUT_OF_DATE` 时只重建并重试一次，仍失败
+就回收该帧，允许呈现队列及退出继续推进。
+
+同步、异步呈现分别检查六种注入场景：获取时短暂丢失、重建交换链时丢失、
+获取时连续丢失、真实呈现后返回丢失、呈现请求尚未入队便返回丢失，以及
+连续 64 次获取返回 `OUT_OF_DATE`。12 个进程共 168 项检查全部通过，均正常
+退出。没有重复处理已提交帧，每帧获取最多两次；100 次跳过帧的 fence
+全部完成回收。新 surface 与交换链在实际 GPU 上创建和销毁，未记录
+critical Vulkan 验证回调或同步冲突。诊断注入已从正式源码与可执行文件移除。
+
+这些检查验证受控故障返回下的资源生命周期，不代表已经自然复现或覆盖
+所有窗口销毁、显示器切换和 Metal surface 丢失事件，也不是卡顿改善测量。
+记录保存在本机 `.cache/diagnostics/surface-recovery-{baseline,fixed}-*.json`、
+对应的 `-runner.txt` 和 `-eden_log.txt`。
+
+移除诊断注入后的正式构建通过 96 个相关测试、58,518 条断言。
+无输入的同步验证运行约 79 秒，采样观察到客体 CPU、Maxwell3D 绘制和
+异步呈现，未记录 critical Vulkan 回调、同步冲突或零尺寸交换链创建，
+一次 SIGTERM 后退出码 0。随后关闭验证层的普通启动在约 4 秒时发生
+SIGSEGV；崩溃栈落在 VSync 线程调用 NVDRV `GetDevice` 时的设备表查询，
+因此该次普通运行不能记作成功。进一步修复这条设备表竞态后再验证普通运行。
+原始记录为 `surface-recovery-clean-{validation,startup}-eden_log.txt`、
+`surface-recovery-clean-validation-sample.txt`、
+`surface-recovery-clean-startup-crash.ips` 与 `surface-recovery-clean-tests.txt`。
+
 ### 固定缓冲映射冲突与通道绑定
 
 普通固定缓冲映射原先只替换同起点的记录，部分重叠时会同时保留两个

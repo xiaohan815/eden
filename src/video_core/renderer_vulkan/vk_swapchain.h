@@ -36,8 +36,11 @@ public:
     /// Acquires the next image in the swapchain, waits as needed.
     bool AcquireNextImage();
 
-    /// Presents the rendered image to the swapchain.
-    void Present(VkSemaphore render_semaphore);
+    /// Presents the rendered image; returns false when the surface must be replaced.
+    [[nodiscard]] bool Present(VkSemaphore render_semaphore);
+
+    /// Completes pending submissions and releases the swapchain before replacing its surface.
+    void Release();
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {

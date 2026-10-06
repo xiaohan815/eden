@@ -301,29 +301,25 @@ void PresentManager::SetImageCount() {
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
-    bool requires_recreation = false;
-
-    while (true) {
-        try {
-            // Recreate surface and swapchain if needed.
-            if (requires_recreation) {
-#ifdef ANDROID
-                surface = CreateSurface(instance, render_window.GetWindowInfo());
-#endif
-                if (!RecreateSwapchain(frame)) {
-                    return DiscardFrame(frame);
-                }
-            }
-
-            // Draw to swapchain.
-            return CopyToSwapchainImpl(frame);
-        } catch (const vk::Exception& except) {
-            if (except.GetResult() != VK_ERROR_SURFACE_LOST_KHR) {
-                throw;
-            }
-
-            requires_recreation = true;
+    try {
+        if (recreate_surface) {
+            // The old surface must outlive its swapchain. Release GPU references
+            // before replacing it, including on desktop platforms.
+            swapchain.Release();
+            surface = CreateSurface(instance, render_window.GetWindowInfo());
+            recreate_surface = false;
         }
+
+        return CopyToSwapchainImpl(frame);
+    } catch (const vk::Exception& except) {
+        if (except.GetResult() != VK_ERROR_SURFACE_LOST_KHR) {
+            throw;
+        }
+
+        // Creation/acquisition failed before the frame copy consumed render_ready.
+        // Drain this frame and try a new surface on the next frame, without spinning.
+        recreate_surface = true;
+        return DiscardFrame(frame);
     }
 }
 
@@ -340,8 +336,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
     }
 
-    while (swapchain.AcquireNextImage()) {
-        if (!RecreateSwapchain(frame)) {
+    if (swapchain.AcquireNextImage()) {
+        // A surface can remain out of date after recreation. Retry only once so
+        // the presentation queue and shutdown can continue to make progress.
+        if (!RecreateSwapchain(frame) || swapchain.AcquireNextImage()) {
             return DiscardFrame(frame);
         }
     }
@@ -476,7 +474,11 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     SubmitFrame(frame, submit_info);
 
     // Present
-    swapchain.Present(render_semaphore);
+    // The copy submission already consumed render_ready and owns present_done.
+    // A lost surface here must not resubmit or discard the same frame.
+    if (!swapchain.Present(render_semaphore)) {
+        recreate_surface = true;
+    }
 }
 
 void PresentManager::DiscardFrame(Frame* frame) {

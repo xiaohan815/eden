@@ -216,7 +216,7 @@ bool Swapchain::AcquireNextImage() {
     return false;
 }
 
-void Swapchain::Present(VkSemaphore render_semaphore) {
+bool Swapchain::Present(VkSemaphore render_semaphore) {
     const auto present_queue{device.GetPresentQueue()};
     const VkPresentInfoKHR present_info{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -240,8 +240,8 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         is_outdated = true;
         break;
     case VK_ERROR_SURFACE_LOST_KHR:
-        vk::Check(result);
-        break;
+        is_outdated = true;
+        return false;
     default:
         LOG_CRITICAL(Render_Vulkan, "Failed to present with error {}", string_VkResult(result));
         break;
@@ -250,6 +250,16 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     if (frame_index >= image_count) {
         frame_index = 0;
     }
+    return true;
+}
+
+void Swapchain::Release() {
+    is_outdated = true;
+    if (swapchain) {
+        std::scoped_lock lock{scheduler.submit_mutex};
+        vk::Check(device.GetLogical().WaitIdle());
+    }
+    Destroy();
 }
 
 bool Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
