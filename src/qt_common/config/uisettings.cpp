@@ -68,12 +68,12 @@ const std::array<Shortcut, 33> default_hotkeys{{
 // clang-format on
 
 const Themes themes{{
-    {"Default", "default"},
-    {"Default Colorful", "colorful"},
-    {"Dark", "qdarkstyle"},
-    {"Dark Colorful", "colorful_dark"},
-    {"Midnight Blue", "qdarkstyle_midnight_blue"},
-    {"Midnight Blue Colorful", "colorful_midnight_blue"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Default"), "default"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Default Colorful"), "colorful"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Dark"), "qdarkstyle"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Dark Colorful"), "colorful_dark"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Midnight Blue"), "qdarkstyle_midnight_blue"},
+    {QT_TRANSLATE_NOOP("ConfigureUi", "Midnight Blue Colorful"), "colorful_midnight_blue"},
 }};
 
 bool IsDarkTheme() {

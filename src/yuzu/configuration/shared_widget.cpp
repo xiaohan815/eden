@@ -20,6 +20,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDateTimeEdit>
+#include <QEvent>
 #include <QIcon>
 #include <QLabel>
 #include <QLayout>
@@ -95,6 +96,7 @@ QPushButton* Widget::CreateRestoreGlobalButton(bool using_global, QWidget* paren
 
 QLabel* Widget::CreateLabel(const QString& text) {
     QLabel* qt_label = new QLabel(text, this->parent);
+    label_widget = qt_label;
     qt_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     return qt_label;
 }
@@ -709,6 +711,41 @@ bool Widget::Valid() const {
 }
 
 Widget::~Widget() = default;
+
+void Widget::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::LanguageChange && created) {
+        const auto translated = InitializeTranslations(parent);
+        if (const auto it = translated->find(setting.Id()); it != translated->end()) {
+            const auto& [label, tooltip] = it->second;
+            if (label_widget) {
+                label_widget->setText(label);
+            }
+            if (checkbox) {
+                checkbox->setText(label);
+            }
+            setToolTip(tooltip);
+        }
+
+        const auto enumerations = ComboboxEnumeration(parent);
+        if (const auto it = enumerations->find(setting.EnumIndex()); it != enumerations->end()) {
+            const auto& entries = it->second;
+            if (combobox) {
+                for (int i = 0; i < combobox->count() && i < static_cast<int>(entries.size()); ++i) {
+                    combobox->setItemText(i, entries[i].second);
+                }
+            }
+            for (const auto& [id, button] : radio_buttons) {
+                for (const auto& [value, name] : entries) {
+                    if (id == value) {
+                        button->setText(name);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    QWidget::changeEvent(event);
+}
 
 Widget::Widget(Settings::BasicSetting* setting_, const TranslationMap& translations_,
                const ComboboxTranslationMap& combobox_translations_, QWidget* parent_,

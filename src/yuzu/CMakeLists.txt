@@ -349,7 +349,20 @@ if (ENABLE_QT_TRANSLATION)
         get_filename_component(QM_FILE ${QM} NAME)
         file(APPEND ${LANGUAGES_QRC} "<file>${QM_FILE}</file>\n")
     endforeach (QM)
-    file(APPEND ${LANGUAGES_QRC} "</qresource></RCC>")
+    file(APPEND ${LANGUAGES_QRC} "</qresource>\n")
+
+    # Package Qt's own dialog/button translations separately from Eden's locale list.
+    set(YUZU_QT_BASE_TRANSLATIONS "" CACHE PATH "Path to Qt base translation catalogs")
+    if (YUZU_QT_BASE_TRANSLATIONS)
+        file(GLOB QT_BASE_QM CONFIGURE_DEPENDS "${YUZU_QT_BASE_TRANSLATIONS}/qtbase_*.qm")
+        file(APPEND ${LANGUAGES_QRC} "<qresource prefix=\"qt_languages\">\n")
+        foreach (QM ${QT_BASE_QM})
+            get_filename_component(QM_FILE ${QM} NAME)
+            file(APPEND ${LANGUAGES_QRC} "<file alias=\"${QM_FILE}\">${QM}</file>\n")
+        endforeach ()
+        file(APPEND ${LANGUAGES_QRC} "</qresource>\n")
+    endif ()
+    file(APPEND ${LANGUAGES_QRC} "</RCC>\n")
 
     # Add the QRC file to package in all QM files
     qt_add_resources(LANGUAGES ${LANGUAGES_QRC})

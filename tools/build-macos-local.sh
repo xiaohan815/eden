@@ -17,16 +17,18 @@ eden_moltenvk="${EDEN_MOLTENVK_LIBRARY:-/Applications/eden.app/Contents/Framewor
 
 "$eden_cmake" -S "$eden_root" -B "$eden_build" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_MAKE_PROGRAM="$eden_ninja" \
-    -DCMAKE_PREFIX_PATH="$eden_boost;$eden_brew/opt/qtbase;$eden_brew/opt/qtcharts" \
+    -DCMAKE_PREFIX_PATH="$eden_boost;$eden_brew/opt/qtbase;$eden_brew/opt/qtcharts;$eden_brew/opt/qttools" \
     -DCPM_SOURCE_CACHE="$eden_root/.cache/cpm" -DBoost_USE_STATIC_LIBS=ON \
     -DQt6_DIR="$eden_brew/opt/qtbase/lib/cmake/Qt6" \
     -DQt6Charts_DIR="$eden_brew/opt/qtcharts/lib/cmake/Qt6Charts" \
+    -DQt6LinguistTools_DIR="$eden_brew/opt/qttools/lib/cmake/Qt6LinguistTools" \
+    -DYUZU_QT_BASE_TRANSLATIONS="$eden_brew/opt/qttranslations/share/qt/translations" \
     -DGLSLANGVALIDATOR="$eden_brew/bin/glslangValidator" \
     -DOPENSSL_ROOT_DIR="$eden_brew/opt/openssl@3" \
     -DMOLTENVK_LIBRARY="$eden_moltenvk" \
     -DENABLE_QT=ON -DENABLE_LTO=OFF -DENABLE_LIBUSB=OFF \
     -DENABLE_WEB_SERVICE=OFF -DENABLE_UPDATE_CHECKER=OFF \
-    -DENABLE_QT_TRANSLATION=OFF -DYUZU_USE_QT_MULTIMEDIA=OFF \
+    -DENABLE_QT_TRANSLATION=ON -DYUZU_USE_QT_MULTIMEDIA=OFF \
     -DYUZU_USE_QT_WEB_ENGINE=OFF -DYUZU_USE_BUNDLED_QT=OFF \
     -DYUZU_USE_BUNDLED_OPENSSL=OFF -DYUZU_USE_BUNDLED_MOLTENVK=OFF \
     -DYUZU_USE_BUNDLED_FFMPEG=OFF -DYUZU_DISABLE_LLVM=ON \

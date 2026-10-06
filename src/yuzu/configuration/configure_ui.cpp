@@ -63,7 +63,7 @@ static float GetUpFactor(Settings::ResolutionSetup res_setup) {
     return info.up_factor;
 }
 
-static void PopulateResolutionComboBox(QComboBox* screenshot_height, QWidget* parent) {
+static void PopulateResolutionComboBox(QComboBox* screenshot_height) {
     screenshot_height->clear();
 
     const auto& enumeration =
@@ -77,7 +77,8 @@ static void PopulateResolutionComboBox(QComboBox* screenshot_height, QWidget* pa
         resolutions.emplace(height_docked);
     }
 
-    screenshot_height->addItem(parent->tr("Auto", "Screenshot height option"));
+    screenshot_height->addItem(QCoreApplication::translate("ConfigureUi", "Auto",
+                                                         "Screenshot height option"));
     for (const auto res : resolutions) {
         screenshot_height->addItem(QString::fromStdString(std::to_string(res)));
     }
@@ -96,14 +97,14 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
     InitializeLanguageComboBox();
 
     for (const auto& theme : UISettings::themes) {
-        ui->theme_combobox->addItem(QString::fromUtf8(theme.first),
+        ui->theme_combobox->addItem(tr(theme.first),
                                     QString::fromUtf8(theme.second));
     }
 
     InitializeIconSizeComboBox();
     InitializeRowComboBoxes();
 
-    PopulateResolutionComboBox(ui->screenshot_height, this);
+    PopulateResolutionComboBox(ui->screenshot_height);
 
     SetConfiguration();
 
@@ -213,6 +214,15 @@ void ConfigureUi::changeEvent(QEvent* event) {
 void ConfigureUi::RetranslateUI() {
     ui->retranslateUi(this);
 
+    ui->language_combobox->setItemText(0, tr("<System>"));
+    ui->language_combobox->setItemText(1, tr("English"));
+    for (int i = 0; i < ui->theme_combobox->count(); ++i) {
+        ui->theme_combobox->setItemText(i, tr(UISettings::themes[i].first));
+    }
+    // Only replace the automatic preset's text; preserve the selected/custom height.
+    ui->screenshot_height->setItemText(0, tr("Auto", "Screenshot height option"));
+    UpdateWidthText();
+
     for (int i = 0; i < ui->folder_icon_size_combobox->count(); i++) {
         ui->folder_icon_size_combobox->setItemText(
             i, GetTranslatedFolderIconSize(static_cast<size_t>(i)));
@@ -234,8 +244,12 @@ void ConfigureUi::InitializeLanguageComboBox() {
         QString locale = it.next();
         locale.truncate(locale.lastIndexOf(QLatin1Char{'.'}));
         locale.remove(0, locale.lastIndexOf(QLatin1Char{'/'}) + 1);
-        const QString lang = QLocale::languageToString(QLocale(locale).language());
-        const QString country = QLocale::territoryToString(QLocale(locale).territory());
+        if (locale == QStringLiteral("en")) {
+            continue;
+        }
+        const QLocale language_locale{locale};
+        const QString lang = language_locale.nativeLanguageName();
+        const QString country = language_locale.nativeTerritoryName();
         ui->language_combobox->addItem(QStringLiteral("%1 (%2)").arg(lang, country), locale);
     }
 

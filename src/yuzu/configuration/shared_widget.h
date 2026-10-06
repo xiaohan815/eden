@@ -107,6 +107,8 @@ public:
     std::vector<std::pair<u32, QRadioButton*>> radio_buttons{};
 
 private:
+    void changeEvent(QEvent* event) override;
+
     void SetupComponent(const QString& label, std::function<void()>& load_func, bool managed,
                         RequestType request, float multiplier,
                         Settings::BasicSetting* other_setting, const QString& suffix);
@@ -142,6 +144,7 @@ private:
                                  const std::function<void()>& touch);
 
     QWidget* parent;
+    QLabel* label_widget{};
     const TranslationMap& translations;
     const ComboboxTranslationMap& combobox_enumerations;
     Settings::BasicSetting& setting;

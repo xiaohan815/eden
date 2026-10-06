@@ -729,7 +729,7 @@ Options lower than 1X can cause artifacts.</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="152"/>
         <source>Determines how sharpened the image will look using FSR&apos;s or SGSR&apos;s dynamic contrast.</source>
-        <translation type="unfinished"/>
+        <translation>调整 FSR 或 SGSR 动态对比度的锐化强度。</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="153"/>
@@ -856,7 +856,7 @@ BC1/BC3: 中间格式将被重新压缩为 BC1 或 BC3 格式,从而节省显存
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="189"/>
         <source>VRAM Usage Mode:</source>
-        <translation>VRAM 使用模式：</translation>
+        <translation>显存使用模式：</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="190"/>
@@ -878,13 +878,14 @@ Aggressive mode may impact performance of other applications such as recording s
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="196"/>
         <source>Anti-Flicker</source>
-        <translation type="unfinished"/>
+        <translation>防闪烁</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="197"/>
         <source>Forces GPU fence callbacks to wait for submitted GPU work.
 Use with Fast GPU mode, to avoid flicker with lower performance impact.</source>
-        <translation type="unfinished"/>
+        <translation>强制 GPU 栅栏回调等待已提交的 GPU 任务完成。
+配合快速 GPU 模式使用，可降低闪烁，并减少对性能的影响。</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="199"/>
@@ -1656,12 +1657,12 @@ When a program attempts to open the controller applet, it is immediately closed.
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="495"/>
         <source>Snapdragon Game Super Resolution</source>
-        <translation type="unfinished"/>
+        <translation>骁龙游戏超分辨率（SGSR）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="496"/>
         <source>Snapdragon Game Super Resolution EdgeDir</source>
-        <translation type="unfinished"/>
+        <translation>骁龙游戏超分辨率（SGSR EdgeDir）</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="500"/>
@@ -2289,6 +2290,11 @@ When a program attempts to open the controller applet, it is immediately closed.
         <location filename="../../src/qt_common/config/shared_translation.cpp" line="687"/>
         <source>Grid View</source>
         <translation>网格视图</translation>
+    </message>
+    <message>
+        <location filename="../../src/qt_common/config/shared_translation.cpp" line="152" />
+        <source>Determines how sharpened the image will look using FSR's dynamic contrast.</source>
+        <translation>调整 FSR 动态对比度的锐化强度。</translation>
     </message>
 </context>
 <context>
@@ -3344,7 +3350,7 @@ Would you like to delete the old save data?</source>
         <location filename="../../src/yuzu/configuration/configure_graphics.cpp" line="224"/>
         <source>%</source>
         <comment>FSR/SGSR sharpening percentage (e.g. 50%)</comment>
-        <translation type="unfinished"/>
+        <translation>%</translation>
     </message>
     <message>
         <location filename="../../src/yuzu/configuration/configure_graphics.cpp" line="361"/>
@@ -3370,6 +3376,12 @@ Would you like to delete the old save data?</source>
         <location filename="../../src/yuzu/configuration/configure_graphics.cpp" line="370"/>
         <source>VSync On</source>
         <translation>垂直同步开</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/configuration/configure_graphics.cpp" line="268" />
+        <source>%</source>
+        <comment>FSR sharpening percentage (e.g. 50%)</comment>
+        <translation>%</translation>
     </message>
 </context>
 <context>
@@ -5630,6 +5642,35 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <comment>Screenshot width value</comment>
         <translation>自动 (%1 x %2, %3 x %4)</translation>
     </message>
+    <message>
+        <source>Default</source>
+        <translation>默认</translation>
+    </message>
+    <message>
+        <source>Default Colorful</source>
+        <translation>默认（彩色）</translation>
+    </message>
+    <message>
+        <source>Dark</source>
+        <translation>深色</translation>
+    </message>
+    <message>
+        <source>Dark Colorful</source>
+        <translation>深色（彩色）</translation>
+    </message>
+    <message>
+        <source>Midnight Blue</source>
+        <translation>午夜蓝</translation>
+    </message>
+    <message>
+        <source>Midnight Blue Colorful</source>
+        <translation>午夜蓝（彩色）</translation>
+    </message>
+    <message>
+        <source>Auto</source>
+        <comment>Screenshot height option</comment>
+        <translation>自动</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureVibration</name>
@@ -6110,7 +6151,7 @@ Please go to Configure -&gt; System -&gt; Network and make a selection.</source>
     <message>
         <location filename="../../src/yuzu/bootmanager.cpp" line="916"/>
         <source>This build doesn&apos;t have OpenGL support.</source>
-        <translation type="unfinished"/>
+        <translation>此构建不支持 OpenGL。</translation>
     </message>
 </context>
 <context>
@@ -7964,7 +8005,7 @@ Please, only use this feature to install updates and DLC.</source>
     <message>
         <location filename="../../src/yuzu/main_window.cpp" line="4174"/>
         <source>NO AA</source>
-        <translation>无 AA</translation>
+        <translation>无抗锯齿</translation>
     </message>
     <message>
         <location filename="../../src/yuzu/main_window.cpp" line="4183"/>
@@ -8157,12 +8198,12 @@ Would you like to bypass this and exit anyway?</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.h" line="56"/>
         <source>SGSR</source>
-        <translation type="unfinished"/>
+        <translation>SGSR</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.h" line="57"/>
         <source>SGSR EdgeDir</source>
-        <translation type="unfinished"/>
+        <translation>SGSR EdgeDir</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.h" line="61"/>
@@ -8177,7 +8218,7 @@ Would you like to bypass this and exit anyway?</source>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.h" line="66"/>
         <source>Fast</source>
-        <translation>加速</translation>
+        <translation>快速</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/config/shared_translation.h" line="67"/>
@@ -8213,6 +8254,47 @@ Would you like to bypass this and exit anyway?</source>
         <location filename="../../src/qt_common/config/shared_translation.h" line="79"/>
         <source>Null</source>
         <translation>空</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="3986" />
+        <location filename="../../src/yuzu/main_window.cpp" line="4009" />
+        <source>Keys not installed</source>
+        <translation>尚未安装密钥</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="3987" />
+        <location filename="../../src/yuzu/main_window.cpp" line="4010" />
+        <source>Install decryption keys and restart Eden before attempting to install firmware.</source>
+        <translation>请先安装解密密钥并重启 Eden，再安装固件。</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="3992" />
+        <source>Select Dumped Firmware Source Location</source>
+        <translation>选择已导出的固件目录</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="4015" />
+        <source>Select Dumped Firmware ZIP</source>
+        <translation>选择已导出的固件 ZIP 文件</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="4015" />
+        <source>Zipped Archives (*.zip)</source>
+        <translation>ZIP 压缩文件 (*.zip)</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="4031" />
+        <source>Firmware cleanup failed</source>
+        <translation>固件临时文件清理失败</translation>
+    </message>
+    <message>
+        <location filename="../../src/yuzu/main_window.cpp" line="4032" />
+        <source>Failed to clean up extracted firmware cache.
+Check write permissions in the system temp directory and try again.
+OS reported error: %1</source>
+        <translation>无法清理已解压的固件缓存。
+请检查系统临时目录的写入权限后重试。
+系统报告的错误：%1</translation>
     </message>
 </context>
 <context>
@@ -9526,34 +9608,36 @@ Only do this if you&apos;re 100% sure you want to delete this data.</source>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="501"/>
         <source>Keys not installed</source>
-        <translation type="unfinished"/>
+        <translation>尚未安装密钥</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="502"/>
         <source>Install decryption keys and restart Eden before attempting to install firmware.</source>
-        <translation type="unfinished"/>
+        <translation>请先安装解密密钥并重启 Eden，再安装固件。</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="514"/>
         <source>Select Dumped Firmware Source Location</source>
-        <translation type="unfinished"/>
+        <translation>选择已导出的固件目录</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="525"/>
         <source>Select Dumped Firmware ZIP</source>
-        <translation type="unfinished"/>
+        <translation>选择已导出的固件 ZIP 文件</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="542"/>
         <source>Firmware cleanup failed</source>
-        <translation type="unfinished"/>
+        <translation>固件临时文件清理失败</translation>
     </message>
     <message>
         <location filename="../../src/qt_common/util/content.cpp" line="543"/>
         <source>Failed to clean up extracted firmware cache.
 Check write permissions in the system temp directory and try again.
 OS reported error: %1</source>
-        <translation type="unfinished"/>
+        <translation>无法清理已解压的固件缓存。
+请检查系统临时目录的写入权限后重试。
+系统报告的错误：%1</translation>
     </message>
 </context>
 <context>

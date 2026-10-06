@@ -1220,7 +1220,8 @@ void MainWindow::InitializeWidgets() {
             [this](const QPoint& menu_location) {
                 QMenu context_menu;
                 for (auto const& aa_text_pair : ConfigurationShared::anti_aliasing_texts_map) {
-                    context_menu.addAction(aa_text_pair.second, [this, aa_text_pair] {
+                    const auto text = tr(aa_text_pair.second.toUtf8().constData());
+                    context_menu.addAction(text, [this, aa_text_pair] {
                         Settings::values.anti_aliasing.SetValue(aa_text_pair.first);
                         UpdateAAText();
                     });
@@ -1243,7 +1244,8 @@ void MainWindow::InitializeWidgets() {
             [this](const QPoint& menu_location) {
                 QMenu context_menu;
                 for (auto const& filter_text_pair : ConfigurationShared::scaling_filter_texts_map) {
-                    context_menu.addAction(filter_text_pair.second, [this, filter_text_pair] {
+                    const auto text = tr(filter_text_pair.second.toUtf8().constData());
+                    context_menu.addAction(text, [this, filter_text_pair] {
                         Settings::values.scaling_filter.SetValue(filter_text_pair.first);
                         UpdateFilterText();
                     });
@@ -1266,7 +1268,7 @@ void MainWindow::InitializeWidgets() {
                 QMenu context_menu;
 
                 for (auto const& pair : ConfigurationShared::use_docked_mode_texts_map) {
-                    context_menu.addAction(pair.second, [this, &pair] {
+                    context_menu.addAction(tr(pair.second.toUtf8().constData()), [this, &pair] {
                         if (pair.first != Settings::values.use_docked_mode.GetValue()) {
                             OnToggleDockedMode();
                         }
@@ -1290,7 +1292,8 @@ void MainWindow::InitializeWidgets() {
                 QMenu context_menu;
 
                 for (auto const& gpu_accuracy_pair : ConfigurationShared::gpu_accuracy_texts_map) {
-                    context_menu.addAction(gpu_accuracy_pair.second, [this, gpu_accuracy_pair] {
+                    const auto text = tr(gpu_accuracy_pair.second.toUtf8().constData());
+                    context_menu.addAction(text, [this, gpu_accuracy_pair] {
                         Settings::values.gpu_accuracy.SetValue(gpu_accuracy_pair.first);
                         UpdateGPUAccuracyButton();
                     });
@@ -1320,11 +1323,11 @@ void MainWindow::InitializeWidgets() {
                     if (renderer_backend_pair.first == Settings::RendererBackend::Null) {
                         continue;
                     }
-                    context_menu.addAction(
-                        renderer_backend_pair.second, [this, renderer_backend_pair] {
-                            Settings::values.renderer_backend.SetValue(renderer_backend_pair.first);
-                            UpdateAPIText();
-                        });
+                    const auto text = tr(renderer_backend_pair.second.toUtf8().constData());
+                    context_menu.addAction(text, [this, renderer_backend_pair] {
+                        Settings::values.renderer_backend.SetValue(renderer_backend_pair.first);
+                        UpdateAPIText();
+                    });
                 }
                 context_menu.exec(renderer_status_button->mapToGlobal(menu_location));
                 renderer_status_button->repaint();
@@ -4366,37 +4369,38 @@ void MainWindow::UpdateGPUAccuracyButton() {
     const auto gpu_accuracy = Settings::values.gpu_accuracy.GetValue();
     const auto gpu_accuracy_text =
         ConfigurationShared::gpu_accuracy_texts_map.find(gpu_accuracy)->second;
-    gpu_accuracy_button->setText(gpu_accuracy_text.toUpper());
+    gpu_accuracy_button->setText(tr(gpu_accuracy_text.toUtf8().constData()).toUpper());
     gpu_accuracy_button->setChecked(gpu_accuracy != Settings::GpuAccuracy::Low);
 }
 
 void MainWindow::UpdateDockedButton() {
     const auto console_mode = Settings::values.use_docked_mode.GetValue();
     dock_status_button->setChecked(Settings::IsDockedMode());
-    dock_status_button->setText(
-        ConfigurationShared::use_docked_mode_texts_map.find(console_mode)->second.toUpper());
+    const auto mode_text = ConfigurationShared::use_docked_mode_texts_map.find(console_mode)->second;
+    dock_status_button->setText(tr(mode_text.toUtf8().constData()).toUpper());
 }
 
 void MainWindow::UpdateAPIText() {
     const auto api = Settings::values.renderer_backend.GetValue();
     const auto renderer_status_text =
         ConfigurationShared::renderer_backend_texts_map.find(api)->second;
-    renderer_status_button->setText(renderer_status_text.toUpper());
+    renderer_status_button->setText(tr(renderer_status_text.toUtf8().constData()).toUpper());
 }
 
 void MainWindow::UpdateFilterText() {
     const auto filter = Settings::values.scaling_filter.GetValue();
     const auto filter_text = ConfigurationShared::scaling_filter_texts_map.find(filter)->second;
-    filter_status_button->setText(filter == Settings::ScalingFilter::Fsr ? tr("FSR")
-                                                                         : filter_text.toUpper());
+    filter_status_button->setText(filter == Settings::ScalingFilter::Fsr
+                                      ? tr("FSR")
+                                      : tr(filter_text.toUtf8().constData()).toUpper());
 }
 
 void MainWindow::UpdateAAText() {
     const auto aa_mode = Settings::values.anti_aliasing.GetValue();
     const auto aa_text = ConfigurationShared::anti_aliasing_texts_map.find(aa_mode)->second;
     aa_status_button->setText(aa_mode == Settings::AntiAliasing::None
-                                  ? QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "NO AA"))
-                                  : aa_text.toUpper());
+                                  ? tr("NO AA")
+                                  : tr(aa_text.toUtf8().constData()).toUpper());
 }
 
 void MainWindow::UpdateVolumeUI() {
@@ -4836,6 +4840,8 @@ void MainWindow::UpdateUITheme() {
 }
 
 void MainWindow::LoadTranslation() {
+    qApp->removeTranslator(&translator);
+    qApp->removeTranslator(&qt_translator);
     bool loaded;
 
     if (UISettings::values.language.GetValue().empty()) {
@@ -4848,6 +4854,17 @@ void MainWindow::LoadTranslation() {
     }
 
     if (loaded) {
+        const auto& language = UISettings::values.language.GetValue();
+        const bool qt_loaded = language.empty()
+                                   ? qt_translator.load(QLocale(), QStringLiteral("qtbase"),
+                                                        QStringLiteral("_"),
+                                                        QStringLiteral(":/qt_languages/"))
+                                   : qt_translator.load(QStringLiteral("qtbase_") +
+                                                            QString::fromStdString(language),
+                                                        QStringLiteral(":/qt_languages/"));
+        if (qt_loaded) {
+            qApp->installTranslator(&qt_translator);
+        }
         qApp->installTranslator(&translator);
     } else {
         UISettings::values.language = std::string("en");
@@ -4855,19 +4872,17 @@ void MainWindow::LoadTranslation() {
 }
 
 void MainWindow::OnLanguageChanged(const QString& locale) {
-    if (UISettings::values.language.GetValue() != std::string("en")) {
-        qApp->removeTranslator(&translator);
-    }
+    UISettings::values.language = locale.toStdString();
+    LoadTranslation();
 
     QList<QAction*> actions = game_size_actions->actions();
     for (size_t i = 0; i < default_game_icon_sizes.size(); i++) {
         actions.at(i)->setText(GetTranslatedGameIconSize(i));
     }
 
-    UISettings::values.language = locale.toStdString();
-    LoadTranslation();
     ui->retranslateUi(this);
     multiplayer_state->retranslateUi();
+    UpdateStatusButtons();
     UpdateWindowTitle();
 }
 

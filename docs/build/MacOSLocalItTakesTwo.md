@@ -10,6 +10,7 @@
 先按照 [Deps.md](../Deps.md) 准备构建依赖，再在仓库根目录执行：
 
 ```sh
+brew install qttools qttranslations
 bash tools/build-macos-local.sh
 ```
 
@@ -29,6 +30,21 @@ build/macos-core/bin/eden.app
 可通过 `EDEN_CMAKE`、`EDEN_NINJA`、`EDEN_BOOST_PREFIX`、
 `EDEN_MOLTENVK_LIBRARY`、`EDEN_BUILD_DIR` 和 `EDEN_JOBS` 覆盖这些选择。
 完整依赖说明见 [Deps.md](../Deps.md)。
+
+## 简体中文界面
+
+本地构建启用 Qt 翻译，并将 Eden 与 Qt 标准对话框的翻译打包到应用中。
+`qttools` 提供 Linguist 构建工具，`qttranslations` 提供 Qt 的按钮和对话框译文。
+在「首选项 → 通用 → 界面」中选择「简体中文（中国）」；系统语言为简体中文时，
+也可以选择系统语言选项。切换语言会立即应用当前配置。
+此设置只影响 Eden 的菜单、设置和提示。
+
+修正了共享设置使用错误翻译上下文的问题，并补全当前简体中文目录的缺失译文。
+底部的 GPU 精度、主机模式、缩放过滤器和抗锯齿按钮也会使用所选语言。
+主题名称、截图的自动分辨率选项以及共享设置也会随语言切换刷新。
+本机独立测试配置已选择 `zh_CN`；中文菜单、设置、状态栏和标准按钮均已实机检查。
+目录共 1,947 条译文，无未完成项，Qt 占位符检查通过。
+共享设置的中英文来回切换验证通过，勾选状态与枚举选项保持不变。
 
 ## 使用独立配置运行
 
@@ -100,8 +116,8 @@ Preferences → Controls 中为玩家一、玩家二分别选择控制器，并�
   本次启动没有再次出现 EA 用户协议页面。
   2×分辨率、16 GiB 预算下，主菜单和已观察的开场镜头约 30 FPS；
   首次加载新场景时有着色器编译停顿。
-  窗口可以关闭并重新启动；一次关闭窗口后进程仍停留在主事件循环，
-  已结束该测试进程，正常退出仍需进一步回归。
+  后续两次通过「模拟 → 停止」返回游戏列表，再退出应用，进程均正常结束。
+  一次早期关闭窗口后进程曾停留在主事件循环，长期退出稳定性仍需验证。
 - 主菜单背景和开场 3D 场景均有严重颜色、光照异常，
   GPU Accurate 与 Sync Memory Operations 没有消除这些异常。
   尚未验证可操作的双人关卡性能或长期稳定性。
@@ -110,6 +126,13 @@ Preferences → Controls 中为玩家一、玩家二分别选择控制器，并�
 MoltenVK 没有暴露游戏所需的几何流/transform feedback 能力；
 这会阻止相关管线创建，但尚未证明它是颜色异常的唯一原因。
 已有帧率数据不足以认定完整游戏可玩。
+
+另已修正 MoltenVK 管线处理未使用颜色附件时调用格式转换的问题；
+原先大量 `Unimplemented format=0` 日志已消失，颜色异常仍存在。
+关闭 MoltenVK fast math 的诊断运行也未消除偏色。
+将 MoltenVK 的 FP16 指令降为 FP32 的实验同样未改善主菜单偏色，已撤回。
+导出的 288 个着色器通过 Vulkan 1.3 SPIR-V 验证（启用 uniform buffer standard layout）；
+这只能排除结构验证错误，不能证明 Metal 转换或实际渲染正确。
 
 构建和诊断日志保存在 `.cache/diagnostics`；不应把游戏内容、密钥、
 存档或程序导出加入源码提交。临时调试器、游戏资源补丁和 Unicorn 测试修改
