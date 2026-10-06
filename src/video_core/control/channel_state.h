@@ -7,6 +7,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 
 #include "common/common_types.h"
 #include "video_core/engines/fermi_2d.h"
@@ -34,6 +35,8 @@ namespace Control {
 struct ChannelState {
     explicit ChannelState(s32 bind_id);
 
+    [[nodiscard]] bool BindMemoryManager(std::shared_ptr<MemoryManager> manager);
+
     void Init(Core::System& system, GPU& gpu, u64 program_id);
 
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
@@ -56,6 +59,9 @@ struct ChannelState {
     s32 bind_id = -1;
     u64 program_id = 0;
     bool initialized{};
+
+private:
+    std::mutex binding_mutex;
 };
 
 } // namespace Control

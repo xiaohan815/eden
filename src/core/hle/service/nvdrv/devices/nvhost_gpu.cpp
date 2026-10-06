@@ -134,6 +134,11 @@ void nvhost_gpu::OnClose(DeviceFD fd) {
     sessions.erase(fd);
 }
 
+NvResult nvhost_gpu::BindGpuAddressSpace(std::shared_ptr<Tegra::MemoryManager> memory_manager) {
+    return channel_state->BindMemoryManager(std::move(memory_manager)) ? NvResult::Success
+                                                                       : NvResult::BadValue;
+}
+
 NvResult nvhost_gpu::SetNVMAPfd(IoctlSetNvmapFD& params) {
     LOG_DEBUG(Service_NVDRV, "called, fd={}", params.nvmap_fd);
 

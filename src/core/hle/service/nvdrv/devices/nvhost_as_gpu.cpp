@@ -20,9 +20,7 @@
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
 #include "core/hle/service/nvdrv/devices/nvhost_as_gpu.h"
-#include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
-#include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
@@ -495,6 +493,22 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
             existing != mapping_map.end() && !existing->second.fixed) {
             return NvResult::BadValue;
         }
+
+        // Only the mapping at this exact start may be replaced. Partial overlaps
+        // would leave two owners whose later unmaps clear each other's pages.
+        const u64 start = static_cast<u64>(params.offset);
+        const auto next = mapping_map.upper_bound(start);
+        if (next != mapping_map.end() && next->first - start < mapped_size) {
+            LOG_WARNING(Service_NVDRV, "Cannot overlap another GPU buffer at {:#X}", start);
+            return NvResult::BadValue;
+        }
+        if (next != mapping_map.begin()) {
+            const auto previous = std::prev(next);
+            if (previous->first != start && previous->second.size > start - previous->first) {
+                LOG_WARNING(Service_NVDRV, "Cannot overlap another GPU buffer at {:#X}", start);
+                return NvResult::BadValue;
+            }
+        }
     }
 
     const DAddr base = nvmap.PinHandle(params.handle, false);
@@ -550,9 +564,16 @@ NvResult nvhost_as_gpu::UnmapBuffer(IoctlUnmapBuffer& params) {
 NvResult nvhost_as_gpu::BindChannel(IoctlBindChannel& params) {
     LOG_DEBUG(Service_NVDRV, "called, fd={:X}", params.fd);
 
-    auto gpu_channel_device = module.GetDevice<nvhost_gpu>(params.fd);
-    gpu_channel_device->channel_state->memory_manager = gmmu;
-    return NvResult::Success;
+    std::scoped_lock lock(mutex);
+    if (!vm.initialised) {
+        return NvResult::BadValue;
+    }
+    const auto device = module.GetDevice<nvdevice>(params.fd);
+    const auto result = device ? device->BindGpuAddressSpace(gmmu) : NvResult::BadValue;
+    if (result != NvResult::Success) {
+        LOG_WARNING(Service_NVDRV, "Cannot bind GPU address space to channel fd={}", params.fd);
+    }
+    return result;
 }
 
 void nvhost_as_gpu::GetVARegionsImpl(IoctlGetVaRegions& params) {

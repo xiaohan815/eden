@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -16,6 +17,10 @@ class System;
 
 namespace Kernel {
 class KEvent;
+}
+
+namespace Tegra {
+class MemoryManager;
 }
 
 namespace Service::Nvidia::Devices {
@@ -73,6 +78,11 @@ public:
 
     virtual Kernel::KEvent* QueryEvent(u32 event_id) {
         return nullptr;
+    }
+
+    /// Only GPU channel devices can accept an address space.
+    virtual NvResult BindGpuAddressSpace(std::shared_ptr<Tegra::MemoryManager>) {
+        return NvResult::BadValue;
     }
 
 protected:

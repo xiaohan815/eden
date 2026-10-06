@@ -19,7 +19,18 @@ namespace Tegra::Control {
 
 ChannelState::ChannelState(s32 bind_id_) : bind_id{bind_id_}, initialized{} {}
 
+bool ChannelState::BindMemoryManager(std::shared_ptr<MemoryManager> manager) {
+    std::scoped_lock lock(binding_mutex);
+    if (!manager || memory_manager || initialized) {
+        return false;
+    }
+    // Engines retain references to this manager for the channel's lifetime.
+    memory_manager = std::move(manager);
+    return true;
+}
+
 void ChannelState::Init(Core::System& system, GPU& gpu, u64 program_id_) {
+    std::scoped_lock lock(binding_mutex);
     ASSERT(memory_manager);
     program_id = program_id_;
     dma_pusher.emplace(system, gpu, *memory_manager, *this);

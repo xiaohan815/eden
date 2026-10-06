@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <random>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -22,6 +24,7 @@
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvnflinger/ui/graphic_buffer.h"
 #include "core/memory.h"
+#include "video_core/control/channel_state.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
@@ -194,6 +197,79 @@ struct NvMemory : Memory {
 };
 
 } // namespace
+
+TEST_CASE("GPU channels retain their first bound address space", "[gpu_memory][gpu_channel]") {
+    Memory memory;
+    auto original =
+        std::make_shared<Tegra::MemoryManager>(*memory.system, memory.device, 32, 0, 16);
+    auto replacement =
+        std::make_shared<Tegra::MemoryManager>(*memory.system, memory.device, 32, 1, 16);
+    original->BindRasterizer(&memory.rasterizer);
+    replacement->BindRasterizer(&memory.rasterizer);
+    original->Map(GPU_BASE, DEVICE_BASE, PAGE, Tegra::PTEKind::INVALID, false);
+    replacement->Map(GPU_BASE, DEVICE_BASE + PAGE, PAGE, Tegra::PTEKind::INVALID, false);
+    auto channel = std::make_unique<Tegra::Control::ChannelState>(0);
+
+    CHECK_FALSE(channel->BindMemoryManager(nullptr));
+    CHECK_FALSE(channel->memory_manager);
+    REQUIRE(channel->BindMemoryManager(original));
+    CHECK_FALSE(channel->BindMemoryManager(original));
+    CHECK_FALSE(channel->BindMemoryManager(replacement));
+    REQUIRE(channel->memory_manager == original);
+    CHECK(channel->memory_manager->Read<u8>(GPU_BASE) == 0x11);
+    CHECK(replacement->Read<u8>(GPU_BASE) == 0x22);
+
+    channel->initialized = true;
+    CHECK_FALSE(channel->BindMemoryManager(replacement));
+    original.reset();
+    CHECK(channel->memory_manager->Read<u8>(GPU_BASE) == 0x11);
+}
+
+TEST_CASE("Initialized GPU channels reject initial address space binding",
+          "[gpu_memory][gpu_channel]") {
+    Memory memory;
+    auto manager = std::make_shared<Tegra::MemoryManager>(*memory.system, memory.device, 32, 0, 16);
+    auto channel = std::make_unique<Tegra::Control::ChannelState>(0);
+    channel->initialized = true;
+    CHECK_FALSE(channel->BindMemoryManager(manager));
+    CHECK_FALSE(channel->memory_manager);
+}
+
+TEST_CASE("Concurrent GPU channel bindings choose exactly one address space",
+          "[gpu_memory][gpu_channel]") {
+    Memory memory;
+    std::array<std::shared_ptr<Tegra::MemoryManager>, 2> managers{
+        std::make_shared<Tegra::MemoryManager>(*memory.system, memory.device, 32, 0, 16),
+        std::make_shared<Tegra::MemoryManager>(*memory.system, memory.device, 32, 1, 16)};
+    for (size_t i = 0; i < managers.size(); ++i) {
+        managers[i]->BindRasterizer(&memory.rasterizer);
+        managers[i]->Map(GPU_BASE, DEVICE_BASE + i * PAGE, PAGE, Tegra::PTEKind::INVALID, false);
+    }
+    auto channel = std::make_unique<Tegra::Control::ChannelState>(0);
+    std::atomic_bool start{};
+    std::atomic_uint successes{};
+    std::atomic_size_t winner{};
+    std::array<std::thread, 8> threads;
+    for (size_t i = 0; i < threads.size(); ++i) {
+        threads[i] = std::thread([&, i] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (channel->BindMemoryManager(managers[i % managers.size()])) {
+                winner.store(i % managers.size(), std::memory_order_relaxed);
+                successes.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    REQUIRE(successes.load() == 1);
+    REQUIRE(channel->memory_manager == managers[winner.load()]);
+    CHECK(channel->memory_manager->Read<u8>(GPU_BASE) == (winner.load() == 0 ? 0x11 : 0x22));
+    CHECK_FALSE(channel->BindMemoryManager(managers[1 - winner.load()]));
+}
 
 TEST_CASE("GPU block reads observe device holes after mapping", "[gpu_memory]") {
     const bool big_pages = GENERATE(true, false);

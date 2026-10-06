@@ -35,7 +35,6 @@ class EventInterface;
 
 namespace Service::Nvidia::Devices {
 
-class nvhost_as_gpu;
 class nvmap;
 class nvhost_gpu final : public nvdevice {
 public:
@@ -55,8 +54,9 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    NvResult BindGpuAddressSpace(std::shared_ptr<Tegra::MemoryManager> memory_manager) override;
+
 private:
-    friend class nvhost_as_gpu;
     enum class CtxClasses : u32_le {
         Ctx2D = 0x902D,
         Ctx3D = 0xB197,
