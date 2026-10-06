@@ -18,6 +18,7 @@ add_executable(tests
     common/undefined_fix.cpp
     common/unique_function.cpp
     core/core_timing.cpp
+    core/nvdrv.cpp
     core/device_memory_span.cpp
     core/perf_stats.cpp
     core/internal_network/network.cpp

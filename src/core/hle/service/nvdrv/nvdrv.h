@@ -10,6 +10,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <ankerl/unordered_dense.h>
@@ -60,11 +61,15 @@ private:
 class Module final {
 public:
     explicit Module(Core::System& system_);
+    Module(Core::System& system_, Tegra::Host1x::Host1x& host1x);
     ~Module();
 
-    /// Returns a pointer to one of the available devices, identified by its name.
+    /// Returns shared ownership of a device identified by its file descriptor.
     template <typename T>
     std::shared_ptr<T> GetDevice(DeviceFD fd) {
+        // Copy ownership while the table is protected. Device callbacks must run
+        // after releasing this lock, since they can look up other descriptors.
+        std::scoped_lock lock{open_files_mutex};
         auto itr = open_files.find(fd);
         if (itr == open_files.end())
             return nullptr;
@@ -105,13 +110,15 @@ private:
 
     using FilesContainerType = ankerl::unordered_dense::map<DeviceFD, std::shared_ptr<Devices::nvdevice>>;
     /// Mapping of file descriptors to the devices they reference.
+    mutable std::mutex open_files_mutex;
     FilesContainerType open_files;
 
     KernelHelpers::ServiceContext service_context;
 
     EventInterface events_interface;
 
-    ankerl::unordered_dense::map<std::string, std::function<FilesContainerType::iterator(DeviceFD)>> builders;
+    ankerl::unordered_dense::map<std::string, std::function<std::shared_ptr<Devices::nvdevice>()>>
+        builders;
 };
 
 void LoopProcess(Core::System& system);

@@ -563,6 +563,47 @@ SIGSEGV；崩溃栈落在 VSync 线程调用 NVDRV `GetDevice` 时的设备表�
 `surface-recovery-clean-validation-sample.txt`、
 `surface-recovery-clean-startup-crash.ips` 与 `surface-recovery-clean-tests.txt`。
 
+### NVDRV 设备表的并发查询与扩容
+
+上述普通启动的实际崩溃位于
+`Conductor::VsyncThread → Container::ComposeOnDisplay → Module::GetDevice`，
+设备表 `unordered_dense` 的查询读取了无效 bucket 地址（0x48）。显示合成线程
+与 NVDRV 请求共享 `open_files`；原先查询、插入、删除和 FD 分配均未同步。
+设备表扩容会替换底层存储，删除也会移动其他条目，原迭代器无法跨并发修改使用。
+
+现在 FD 分配和所有设备表访问使用同一个互斥量保护。查询在锁内复制
+`shared_ptr`，随后释放锁再执行 ioctl、事件查询或其他设备操作。
+创建及 `OnOpen` 在锁外完成，初始化后才发布设备；关闭时先在锁内移除 FD，
+再在锁外执行 `OnClose`。因此回调可以查询其他 FD，已有调用取得的设备引用
+也不会随表中条目删除而失效。这个锁不负责串行化设备内部的全部操作。
+
+新增回归使用实际 NVDRV Module 与 `nvdisp_disp0` 设备：两个读线程持续执行
+GetDevice / VerifyFD / QueryEvent，另一个线程打开 32,768 个 FD，再交错删除；
+另测两个写线程各自打开 4,096 个 FD 的唯一性，以及关闭后已有设备引用的
+生命周期。Module 可显式接收 Host1x 依赖，生产构造仍使用 System 的 Host1x；
+测试完整初始化并清理内核与 Host1x，不启动客体游戏或依赖游戏文件。
+
+旧设备表的初始化基线在读线程的 GetDevice 查询中复现 SIGSEGV。
+将测试初始化和清理补齐、仅运行并发用例后，旧表又在 QueryEvent 的查表路径
+复现 SIGSEGV，排除了先前测试环境初始化或析构错误作为这次并发故障的解释。
+初次测试环境自身的初始化和清理故障保留为诊断记录，不计作竞态复现。
+修复版新增 3 个测试、16 条断言通过，另外连续重复 5 轮均通过；
+合并回归共 99 个测试、58,534 条断言通过。
+
+同一份独立 1×配置，关闭验证层后无输入运行约 123 秒，随后启用同步验证运行
+约 175 秒，采样均观察到客体 CPU、Maxwell3D 绘制与异步呈现。
+两次在一次 SIGTERM 后正常退出（退出码 0），没有设备表崩溃、丢失 FD 报错、
+critical Vulkan 验证回调或同步冲突。已知的能力检查报错、片元输出及 3D 图像
+警告，以及退出时 `Force stopping EmuThread` / `BufferQueue has been abandoned`
+仍在。这些是启动与资源生命周期回归，没有新的分屏颜色、实际显示节奏、
+后续关卡或长期游玩验证，也没有平均帧率提升测量。
+
+记录保存在本机 `.cache/diagnostics/nvdrv-table-race-baseline-crash.ips`、
+`nvdrv-table-full-fixture-baseline-crash.ips`、
+`nvdrv-table-full-fixture-baseline-tests.txt`、`nvdrv-table-race-fixed-tests.txt`、
+`nvdrv-table-race-fixed-repeat-*.txt`、`nvdrv-table-race-combined-tests.txt`，以及
+`nvdrv-table-race-fixed-{startup,validation}-{eden_log,sample}.txt`。
+
 ### 固定缓冲映射冲突与通道绑定
 
 普通固定缓冲映射原先只替换同起点的记录，部分重叠时会同时保留两个

@@ -65,43 +65,36 @@ void LoopProcess(Core::System& system) {
     ServerManager::RunServer(std::move(server_manager));
 }
 
-Module::Module(Core::System& system)
-    : container{system.Host1x()}, service_context{system, "nvdrv"}, events_interface{*this} {
-    builders["/dev/nvhost-as-gpu"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_as_gpu>(system, *this, container);
-        return open_files.emplace(fd, std::move(device)).first;
+Module::Module(Core::System& system) : Module{system, system.Host1x()} {}
+
+Module::Module(Core::System& system, Tegra::Host1x::Host1x& host1x)
+    : container{host1x}, service_context{system, "nvdrv"}, events_interface{*this} {
+    builders["/dev/nvhost-as-gpu"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_as_gpu>(system, *this, container);
     };
-    builders["/dev/nvhost-gpu"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_gpu>(system, events_interface, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-gpu"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_gpu>(system, events_interface, container);
     };
-    builders["/dev/nvhost-ctrl-gpu"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_ctrl_gpu>(system, events_interface);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-ctrl-gpu"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_ctrl_gpu>(system, events_interface);
     };
-    builders["/dev/nvmap"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvmap>(system, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvmap"] = [this, &system]() {
+        return std::make_shared<Devices::nvmap>(system, container);
     };
-    builders["/dev/nvdisp_disp0"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvdisp_disp0>(system, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvdisp_disp0"] = [this, &system]() {
+        return std::make_shared<Devices::nvdisp_disp0>(system, container);
     };
-    builders["/dev/nvhost-ctrl"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_ctrl>(system, events_interface, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-ctrl"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_ctrl>(system, events_interface, container);
     };
-    builders["/dev/nvhost-nvdec"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_nvdec>(system, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-nvdec"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_nvdec>(system, container);
     };
-    builders["/dev/nvhost-nvjpg"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_nvjpg>(system);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-nvjpg"] = [&system]() {
+        return std::make_shared<Devices::nvhost_nvjpg>(system);
     };
-    builders["/dev/nvhost-vic"] = [this, &system](DeviceFD fd) {
-        auto device = std::make_shared<Devices::nvhost_vic>(system, container);
-        return open_files.emplace(fd, std::move(device)).first;
+    builders["/dev/nvhost-vic"] = [this, &system]() {
+        return std::make_shared<Devices::nvhost_vic>(system, container);
     };
 }
 
@@ -113,6 +106,7 @@ NvResult Module::VerifyFD(DeviceFD fd) const {
         return NvResult::InvalidState;
     }
 
+    std::scoped_lock lock{open_files_mutex};
     if (open_files.find(fd) == open_files.end()) {
         LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
         return NvResult::NotImplemented;
@@ -128,12 +122,19 @@ DeviceFD Module::Open(const std::string& device_name, NvCore::SessionId session_
         return INVALID_NVDRV_FD;
     }
 
-    const DeviceFD fd = next_fd++;
-    auto& builder = it->second;
-    auto device = builder(fd)->second;
-
+    DeviceFD fd;
+    {
+        std::scoped_lock lock{open_files_mutex};
+        fd = next_fd++;
+    }
+    // Device callbacks may look up other descriptors. Initialize before publishing
+    // the device, with the table lock released.
+    auto device = it->second();
     device->OnOpen(session_id, fd);
-
+    {
+        std::scoped_lock lock{open_files_mutex};
+        open_files.emplace(fd, std::move(device));
+    }
     return fd;
 }
 
@@ -144,14 +145,14 @@ NvResult Module::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> input,
         return NvResult::InvalidState;
     }
 
-    const auto itr = open_files.find(fd);
+    const auto device = GetDevice<Devices::nvdevice>(fd);
 
-    if (itr == open_files.end()) {
+    if (!device) {
         LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
         return NvResult::NotImplemented;
     }
 
-    return itr->second->Ioctl1(fd, command, input, output);
+    return device->Ioctl1(fd, command, input, output);
 }
 
 NvResult Module::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> input,
@@ -161,14 +162,14 @@ NvResult Module::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> input,
         return NvResult::InvalidState;
     }
 
-    const auto itr = open_files.find(fd);
+    const auto device = GetDevice<Devices::nvdevice>(fd);
 
-    if (itr == open_files.end()) {
+    if (!device) {
         LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
         return NvResult::NotImplemented;
     }
 
-    return itr->second->Ioctl2(fd, command, input, inline_input, output);
+    return device->Ioctl2(fd, command, input, inline_input, output);
 }
 
 NvResult Module::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input, std::span<u8> output,
@@ -178,14 +179,14 @@ NvResult Module::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input, s
         return NvResult::InvalidState;
     }
 
-    const auto itr = open_files.find(fd);
+    const auto device = GetDevice<Devices::nvdevice>(fd);
 
-    if (itr == open_files.end()) {
+    if (!device) {
         LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
         return NvResult::NotImplemented;
     }
 
-    return itr->second->Ioctl3(fd, command, input, output, inline_output);
+    return device->Ioctl3(fd, command, input, output, inline_output);
 }
 
 NvResult Module::Close(DeviceFD fd) {
@@ -194,17 +195,18 @@ NvResult Module::Close(DeviceFD fd) {
         return NvResult::InvalidState;
     }
 
-    const auto itr = open_files.find(fd);
-
-    if (itr == open_files.end()) {
-        LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
-        return NvResult::NotImplemented;
+    std::shared_ptr<Devices::nvdevice> device;
+    {
+        std::scoped_lock lock{open_files_mutex};
+        const auto itr = open_files.find(fd);
+        if (itr == open_files.end()) {
+            LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
+            return NvResult::NotImplemented;
+        }
+        device = std::move(itr->second);
+        open_files.erase(itr);
     }
-
-    itr->second->OnClose(fd);
-
-    open_files.erase(itr);
-
+    device->OnClose(fd);
     return NvResult::Success;
 }
 
@@ -214,14 +216,14 @@ NvResult Module::QueryEvent(DeviceFD fd, u32 event_id, Kernel::KEvent*& event) {
         return NvResult::InvalidState;
     }
 
-    const auto itr = open_files.find(fd);
+    const auto device = GetDevice<Devices::nvdevice>(fd);
 
-    if (itr == open_files.end()) {
+    if (!device) {
         LOG_ERROR(Service_NVDRV, "Could not find DeviceFD={}!", fd);
         return NvResult::NotImplemented;
     }
 
-    event = itr->second->QueryEvent(event_id);
+    event = device->QueryEvent(event_id);
     if (!event) {
         return NvResult::BadParameter;
     }
