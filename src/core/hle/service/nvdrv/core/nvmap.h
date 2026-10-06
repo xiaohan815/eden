@@ -133,7 +133,7 @@ public:
      * @brief Maps a handle into the SMMU address space
      * @note This operation is refcounted, the number of calls to this must eventually match the
      * number of calls to `UnpinHandle`
-     * @return The SMMU virtual address that the handle has been mapped to
+     * @return The SMMU virtual address, or zero if the handle cannot be pinned
      */
     DAddr PinHandle(Handle::Id handle, bool low_area_pin);
 

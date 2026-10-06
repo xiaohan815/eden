@@ -16,7 +16,10 @@
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/service/nvdrv/core/container.h"
+#include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/memory.h"
+#include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_null/null_rasterizer.h"
@@ -343,4 +346,77 @@ TEST_CASE("GPU accesses stop at the address space boundary", "[gpu_memory]") {
     memory.gpu.Write<u64>(end - 4, value);
     REQUIRE(memory.gpu.Read<u64>(end - 4) == 0x89ABCDEF);
     memory.gpu.WriteBlockUnsafe(~GPUVAddr{0} - 3, &value, sizeof(value));
+}
+
+TEST_CASE("NvMap reclaims an idle handle when the device address space is full",
+          "[gpu_memory][nvmap]") {
+    Memory memory;
+    Tegra::Host1x::Host1x host1x{*memory.system};
+    auto& smmu = host1x.MemoryManager();
+    smmu.BindInterface(&memory.rasterizer);
+    Service::Nvidia::NvCore::Container core{host1x};
+    auto& nvmap = core.GetNvMapFile();
+    const auto session = core.OpenSession(&memory.process);
+    using Handle = Service::Nvidia::NvCore::NvMap::Handle;
+    std::shared_ptr<Handle> idle;
+    std::shared_ptr<Handle> replacement;
+    REQUIRE(nvmap.CreateHandle(PAGE, idle) == Service::Nvidia::NvResult::Success);
+    REQUIRE(idle->Alloc({}, PAGE, 0, CPU_BASE, session) == Service::Nvidia::NvResult::Success);
+    REQUIRE(nvmap.CreateHandle(PAGE, replacement) == Service::Nvidia::NvResult::Success);
+    REQUIRE(replacement->Alloc({}, PAGE, 0, CPU_BASE + PAGE, session) ==
+            Service::Nvidia::NvResult::Success);
+    const DAddr address = nvmap.PinHandle(idle->id, false);
+    REQUIRE(address != 0);
+    const DAddr reserved_start = address + BIG_PAGE;
+    const size_t reserved_size = (DAddr{1} << smmu.AS_BITS) - 1 - reserved_start;
+    // Reserve virtual space only; no host memory or GPU allocation is needed.
+    REQUIRE(smmu.Allocate(reserved_size) == reserved_start);
+    REQUIRE(smmu.Allocate(BIG_PAGE) == 0);
+    nvmap.UnpinHandle(idle->id);
+    REQUIRE(idle->pins == 0);
+    REQUIRE(idle->unmap_queue_entry.has_value());
+
+    REQUIRE(nvmap.PinHandle(replacement->id, false) == address);
+    REQUIRE(idle->d_address == 0);
+    REQUIRE_FALSE(idle->unmap_queue_entry.has_value());
+    REQUIRE(replacement->pins == 1);
+    REQUIRE(smmu.Read<u8>(address) == 0x22);
+
+    nvmap.UnpinHandle(replacement->id);
+    core.CloseSession(session);
+    smmu.Free(reserved_start, reserved_size);
+}
+
+TEST_CASE("NvMap reports a full address space without reclaimable handles", "[gpu_memory][nvmap]") {
+    Memory memory;
+    Tegra::Host1x::Host1x host1x{*memory.system};
+    auto& smmu = host1x.MemoryManager();
+    smmu.BindInterface(&memory.rasterizer);
+    Service::Nvidia::NvCore::Container core{host1x};
+    auto& nvmap = core.GetNvMapFile();
+    const auto session = core.OpenSession(&memory.process);
+    using Handle = Service::Nvidia::NvCore::NvMap::Handle;
+    std::shared_ptr<Handle> active;
+    std::shared_ptr<Handle> replacement;
+    REQUIRE(nvmap.CreateHandle(PAGE, active) == Service::Nvidia::NvResult::Success);
+    REQUIRE(active->Alloc({}, PAGE, 0, CPU_BASE, session) == Service::Nvidia::NvResult::Success);
+    REQUIRE(nvmap.CreateHandle(PAGE, replacement) == Service::Nvidia::NvResult::Success);
+    REQUIRE(replacement->Alloc({}, PAGE, 0, CPU_BASE + PAGE, session) ==
+            Service::Nvidia::NvResult::Success);
+    const DAddr address = nvmap.PinHandle(active->id, false);
+    REQUIRE(address != 0);
+    const DAddr reserved_start = address + BIG_PAGE;
+    const size_t reserved_size = (DAddr{1} << smmu.AS_BITS) - 1 - reserved_start;
+    REQUIRE(smmu.Allocate(reserved_size) == reserved_start);
+    REQUIRE(nvmap.PinHandle(replacement->id, false) == 0);
+    REQUIRE(active->pins == 1);
+    REQUIRE(active->d_address == address);
+    REQUIRE(smmu.Read<u8>(address) == 0x11);
+    REQUIRE(replacement->pins == 0);
+    REQUIRE(replacement->d_address == 0);
+    REQUIRE_FALSE(replacement->unmap_queue_entry.has_value());
+
+    nvmap.UnpinHandle(active->id);
+    core.CloseSession(session);
+    smmu.Free(reserved_start, reserved_size);
 }

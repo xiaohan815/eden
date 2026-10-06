@@ -287,6 +287,9 @@ NvResult nvhost_as_gpu::Remap(std::span<IoctlRemapEntry> entries) {
             }
 
             DAddr base = nvmap.PinHandle(entry.handle, false);
+            if (base == 0) {
+                return NvResult::InsufficientMemory;
+            }
             DAddr device_address{static_cast<DAddr>(
                 base + (static_cast<u64>(entry.handle_offset_big_pages) << vm.big_page_size_bits))};
 
@@ -334,7 +337,11 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
         return NvResult::BadValue;
     }
 
-    DAddr device_address = DAddr(nvmap.PinHandle(params.handle, false) + params.buffer_offset);
+    const DAddr base = nvmap.PinHandle(params.handle, false);
+    if (base == 0) {
+        return NvResult::InsufficientMemory;
+    }
+    DAddr device_address = base + params.buffer_offset;
     u64 size{params.mapping_size ? params.mapping_size : handle->orig_size};
 
     bool big_page{[&]() {
