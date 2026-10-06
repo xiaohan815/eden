@@ -189,7 +189,8 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
 
     RenderAppletCaptureLayer(framebuffers);
 
-    if (!render_window.IsShown()) {
+    const auto& layout = render_window.GetFramebufferLayout();
+    if (!render_window.IsShown() || layout.width == 0 || layout.height == 0) {
         return;
     }
 
@@ -197,9 +198,8 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     Frame* frame = present_manager.GetRenderFrame();
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    blit_swapchain.DrawToFrame(rasterizer, frame, framebuffers,
-                               render_window.GetFramebufferLayout(), swapchain.GetImageCount(),
-                               swapchain.GetImageViewFormat());
+    blit_swapchain.DrawToFrame(rasterizer, frame, framebuffers, layout,
+                               present_manager.GetFrameCount(), swapchain.GetImageViewFormat());
     scheduler.Flush(*frame->render_ready);
 
     present_manager.Present(frame);

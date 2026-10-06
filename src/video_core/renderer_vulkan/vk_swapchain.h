@@ -30,11 +30,8 @@ public:
         u32 height);
     ~Swapchain();
 
-    /// Creates (or recreates) the swapchain with a given size.
-    void Create(
-        VkSurfaceKHR_T* surface,
-        u32 width,
-        u32 height);
+    /// Creates (or recreates) the swapchain; returns false for an unavailable surface extent.
+    [[nodiscard]] bool Create(VkSurfaceKHR_T* surface, u32 width, u32 height);
 
     /// Acquires the next image in the swapchain, waits as needed.
     bool AcquireNextImage();
@@ -44,7 +41,7 @@ public:
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
-        return IsSubOptimal() || NeedsPresentModeUpdate();
+        return !swapchain || IsOutDated() || IsSubOptimal() || NeedsPresentModeUpdate();
     }
 
     /// Returns true when the swapchain is outdated.
@@ -63,6 +60,11 @@ public:
 
     std::size_t GetImageCount() const {
         return image_count;
+    }
+
+    /// Minimum image count requested from the surface, available before initial creation.
+    u32 GetRequestedImageCount() const {
+        return requested_image_count;
     }
 
     std::size_t GetImageIndex() const {
@@ -110,7 +112,7 @@ public:
     }
 
 private:
-    void CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
+    bool CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
     void CreateSemaphores();
     void CreateImageViews();
 
@@ -126,6 +128,7 @@ private:
     vk::SwapchainKHR swapchain;
 
     std::size_t image_count{};
+    u32 requested_image_count{};
     std::vector<VkImage> images;
     std::vector<u64> resource_ticks;
     std::vector<vk::Semaphore> present_semaphores;

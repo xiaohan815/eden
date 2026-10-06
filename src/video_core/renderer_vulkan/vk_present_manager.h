@@ -60,6 +60,11 @@ public:
     /// Waits for the present thread to finish presenting all queued frames.
     void WaitPresent();
 
+    /// Number of reusable rendering frames, independent of recreated swapchain image counts.
+    std::size_t GetFrameCount() const {
+        return frames.size();
+    }
+
 private:
     void PresentThread(std::stop_token token);
 
@@ -67,7 +72,11 @@ private:
 
     void CopyToSwapchainImpl(Frame* frame);
 
-    void RecreateSwapchain(Frame* frame);
+    bool RecreateSwapchain(Frame* frame);
+
+    void DiscardFrame(Frame* frame);
+
+    void SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info);
 
     void SetImageCount();
 
@@ -89,6 +98,7 @@ private:
     std::mutex queue_mutex;
     std::mutex free_mutex;
     std::jthread present_thread;
+    const VkFormat frame_image_format;
     bool blit_supported;
     bool use_present_thread;
     std::size_t image_count{};

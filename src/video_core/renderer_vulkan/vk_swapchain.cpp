@@ -124,38 +124,43 @@ Swapchain::Swapchain(
     , device{device_}
     , scheduler{scheduler_}
 {
-    Create(surface, width_, height_);
+#ifdef ANDROID
+    // Android is already ordered the same as Switch.
+    image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
+#else
+    image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
+    static_cast<void>(Create(surface, width_, height_));
 }
 
 Swapchain::~Swapchain() = default;
 
-void Swapchain::Create(
-    VkSurfaceKHR_T* surface_,
-    u32 width_,
-    u32 height_)
-{
-    is_outdated = false;
-    is_suboptimal = false;
+bool Swapchain::Create(VkSurfaceKHR_T* surface_, u32 width_, u32 height_) {
+    is_outdated = true;
     width = width_;
     height = height_;
     surface = surface_;
 
     const auto physical_device = device.GetPhysical();
     const auto capabilities{physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface))};
-    if (capabilities.maxImageExtent.width == 0 || capabilities.maxImageExtent.height == 0) {
-        return;
+    if (!CreateSwapchain(capabilities)) {
+        return false;
     }
 
-    Destroy();
-
-    CreateSwapchain(capabilities);
     CreateSemaphores();
 
     resource_ticks.clear();
     resource_ticks.resize(image_count);
+    is_outdated = false;
+    is_suboptimal = false;
+    return true;
 }
 
 bool Swapchain::AcquireNextImage() {
+    if (!swapchain) {
+        is_outdated = true;
+        return true;
+    }
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
         VK_NULL_HANDLE, &image_index);
@@ -167,12 +172,10 @@ bool Swapchain::AcquireNextImage() {
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
-        break;
-    case VK_ERROR_SURFACE_LOST_KHR:
-        vk::Check(result);
-        break;
+        return true;
     default:
         LOG_ERROR(Render_Vulkan, "vkAcquireNextImageKHR returned {}", string_VkResult(result));
+        vk::Check(result);
         break;
     }
 
@@ -208,7 +211,9 @@ bool Swapchain::AcquireNextImage() {
 
     resource_ticks[image_index] = scheduler.CurrentTick();
 
-    return is_suboptimal || is_outdated;
+    // SUBOPTIMAL still acquired an image and signaled its semaphore. Present that
+    // image before recreating on the next frame so the signal is consumed.
+    return false;
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
@@ -229,6 +234,7 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         break;
     case VK_SUBOPTIMAL_KHR:
         LOG_DEBUG(Render_Vulkan, "Suboptimal swapchain");
+        is_suboptimal = true;
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
@@ -246,7 +252,7 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     }
 }
 
-void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
+bool Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     const auto physical_device{device.GetPhysical()};
     const auto formats{physical_device.GetSurfaceFormatsKHR(VkSurfaceKHR(surface))};
     const auto present_modes = physical_device.GetSurfacePresentModesKHR(VkSurfaceKHR(surface));
@@ -262,7 +268,7 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     surface_format = ChooseSwapSurfaceFormat(formats);
     present_mode = ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed);
 
-    u32 requested_image_count{capabilities.minImageCount + 1};
+    requested_image_count = capabilities.minImageCount + 1;
     // Ensure Triple buffering if possible.
     if (capabilities.maxImageCount > 0) {
         if (requested_image_count > capabilities.maxImageCount) {
@@ -273,6 +279,11 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         }
     } else {
         requested_image_count = (std::max)(requested_image_count, 3U);
+    }
+    const auto initial_extent = ChooseSwapExtent(capabilities, width, height);
+    if (capabilities.maxImageExtent.width == 0 || capabilities.maxImageExtent.height == 0 ||
+        initial_extent.width == 0 || initial_extent.height == 0) {
+        return false;
     }
     VkSwapchainCreateInfoKHR swapchain_ci{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -328,22 +339,29 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
-    // Request the size again to reduce the possibility of a TOCTOU race condition.
+    // Presentation submissions and their semaphore waits must finish before the
+    // old swapchain and its semaphores are released during recreation.
+    if (swapchain) {
+        std::scoped_lock lock{scheduler.submit_mutex};
+        vk::Check(device.GetLogical().WaitIdle());
+    }
+
+    // The surface can become unavailable while waiting for the old submissions.
     const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
     swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
-    // Don't add code within this and the swapchain creation.
+    if (updated_capabilities.maxImageExtent.width == 0 ||
+        updated_capabilities.maxImageExtent.height == 0 || swapchain_ci.imageExtent.width == 0 ||
+        swapchain_ci.imageExtent.height == 0) {
+        return false;
+    }
+    Destroy();
     swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
 
     extent = swapchain_ci.imageExtent;
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
-#ifdef ANDROID
-    // Android is already ordered the same as Switch.
-    image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
-#else
-    image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
-#endif
+    return true;
 }
 
 void Swapchain::CreateSemaphores() {
@@ -357,9 +375,13 @@ void Swapchain::CreateSemaphores() {
 
 void Swapchain::Destroy() {
     frame_index = 0;
+    image_index = 0;
     present_semaphores.clear();
     render_semaphores.clear();
     swapchain.reset();
+    images.clear();
+    resource_ticks.clear();
+    image_count = 0;
 }
 
 bool Swapchain::NeedsPresentModeUpdate() const {

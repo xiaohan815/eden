@@ -54,7 +54,7 @@ public:
 
     void DrawToFrame(RasterizerVulkan& rasterizer, Frame* frame,
                      std::span<const Tegra::FramebufferConfig> framebuffers,
-                     const Layout::FramebufferLayout& layout, size_t current_swapchain_image_count,
+                     const Layout::FramebufferLayout& layout, size_t current_frame_count,
                      VkFormat current_swapchain_view_format);
 
     [[nodiscard]] vk::Framebuffer CreateFramebuffer(const Layout::FramebufferLayout& layout,

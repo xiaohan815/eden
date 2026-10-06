@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -96,22 +98,14 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice& physical_device, VkFormat form
 } // Anonymous namespace
 
 PresentManager::PresentManager(const vk::Instance& instance_,
-                               Core::Frontend::EmuWindow& render_window_,
-                               const Device& device_,
-                               MemoryAllocator& memory_allocator_,
-                               Scheduler& scheduler_,
-                               Swapchain& swapchain_,
-                               vk::SurfaceKHR& surface_)
-    : instance{instance_}
-    , render_window{render_window_}
-    , device{device_}
-    , memory_allocator{memory_allocator_}
-    , scheduler{scheduler_}
-    , swapchain{swapchain_}
-    , surface{surface_}
-    , blit_supported{CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageViewFormat())}
-    , use_present_thread{Settings::values.async_presentation.GetValue()}
-{
+                               Core::Frontend::EmuWindow& render_window_, const Device& device_,
+                               MemoryAllocator& memory_allocator_, Scheduler& scheduler_,
+                               Swapchain& swapchain_, vk::SurfaceKHR& surface_)
+    : instance{instance_}, render_window{render_window_}, device{device_},
+      memory_allocator{memory_allocator_}, scheduler{scheduler_}, swapchain{swapchain_},
+      surface{surface_}, frame_image_format{swapchain.GetImageFormat()},
+      blit_supported{CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageViewFormat())},
+      use_present_thread{Settings::values.async_presentation.GetValue()} {
     SetImageCount();
 
     auto& dld = device.GetLogical();
@@ -159,7 +153,7 @@ Frame* PresentManager::GetRenderFrame() {
     free_queue.pop_front();
 
     // Wait for the presentation to be finished so all frame resources are free
-    frame->present_done.Wait();
+    vk::Check(frame->present_done.Wait());
     frame->present_done.Reset();
 
     return frame;
@@ -194,7 +188,7 @@ void PresentManager::RecreateFrame(Frame* frame, u32 width, u32 height, VkFormat
         .pNext = nullptr,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT,
         .imageType = VK_IMAGE_TYPE_2D,
-        .format = swapchain.GetImageFormat(),
+        .format = frame_image_format,
         .extent =
             {
                 .width = width,
@@ -293,16 +287,17 @@ void PresentManager::PresentThread(std::stop_token token) {
     }
 }
 
-void PresentManager::RecreateSwapchain(Frame* frame) {
-    swapchain.Create(*surface, frame->width, frame->height); // Pass raw pointer
-    SetImageCount();
+bool PresentManager::RecreateSwapchain(Frame* frame) {
+    return swapchain.Create(*surface, frame->width, frame->height);
 }
 
 void PresentManager::SetImageCount() {
     // We cannot have more than 7 images in flight at any given time.
     // FRAMES_IN_FLIGHT is 8, and the cache TICKS_TO_DESTROY is 8.
     // Mali drivers will give us 6.
-    image_count = std::min<size_t>(swapchain.GetImageCount(), 7);
+    const auto initial_count = swapchain.GetImageCount();
+    image_count = std::clamp<std::size_t>(
+        initial_count ? initial_count : swapchain.GetRequestedImageCount(), 1, 7);
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
@@ -315,7 +310,9 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
 #ifdef ANDROID
                 surface = CreateSurface(instance, render_window.GetWindowInfo());
 #endif
-                RecreateSwapchain(frame);
+                if (!RecreateSwapchain(frame)) {
+                    return DiscardFrame(frame);
+                }
             }
 
             // Draw to swapchain.
@@ -338,11 +335,15 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
     if (is_suboptimal || size_changed) {
-        RecreateSwapchain(frame);
+        if (!RecreateSwapchain(frame)) {
+            return DiscardFrame(frame);
+        }
     }
 
     while (swapchain.AcquireNextImage()) {
-        RecreateSwapchain(frame);
+        if (!RecreateSwapchain(frame)) {
+            return DiscardFrame(frame);
+        }
     }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
@@ -472,24 +473,45 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         .pSignalSemaphores = &render_semaphore,
     };
 
-    // Submit the image copy/blit to the swapchain
-    {
-        std::scoped_lock submit_lock{scheduler.submit_mutex};
-        switch (const VkResult result =
-                    device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
-        case VK_SUCCESS:
-            break;
-        case VK_ERROR_DEVICE_LOST:
-            device.ReportLoss();
-            [[fallthrough]];
-        default:
-            vk::Check(result);
-            break;
-        }
-    }
+    SubmitFrame(frame, submit_info);
 
     // Present
     swapchain.Present(render_semaphore);
+}
+
+void PresentManager::DiscardFrame(Frame* frame) {
+    // Rendering already signaled this binary semaphore and reset present_done.
+    // Consume the signal even without a drawable, then complete the fence before
+    // the frame's images, command buffer and semaphore are reused.
+    const VkSemaphore render_ready = *frame->render_ready;
+    constexpr VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    const VkSubmitInfo submit_info{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &render_ready,
+        .pWaitDstStageMask = &wait_stage,
+        .commandBufferCount = 0,
+        .pCommandBuffers = nullptr,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr,
+    };
+    SubmitFrame(frame, submit_info);
+}
+
+void PresentManager::SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info) {
+    std::scoped_lock submit_lock{scheduler.submit_mutex};
+    switch (const VkResult result =
+                device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
+    case VK_SUCCESS:
+        break;
+    case VK_ERROR_DEVICE_LOST:
+        device.ReportLoss();
+        [[fallthrough]];
+    default:
+        vk::Check(result);
+        break;
+    }
 }
 
 } // namespace Vulkan

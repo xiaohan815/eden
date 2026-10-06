@@ -87,8 +87,7 @@ void BlitScreen::SetWindowAdaptPass() {
 
 void BlitScreen::DrawToFrame(RasterizerVulkan& rasterizer, Frame* frame,
                              std::span<const Tegra::FramebufferConfig> framebuffers,
-                             const Layout::FramebufferLayout& layout,
-                             size_t current_swapchain_image_count,
+                             const Layout::FramebufferLayout& layout, size_t current_frame_count,
                              VkFormat current_swapchain_view_format) {
     bool resource_update_required = false;
     bool presentation_recreate_required = false;
@@ -97,9 +96,9 @@ void BlitScreen::DrawToFrame(RasterizerVulkan& rasterizer, Frame* frame,
         resource_update_required = true;
     }
 
-    if (image_count != current_swapchain_image_count) {
+    if (image_count != current_frame_count) {
         resource_update_required = true;
-        image_count = current_swapchain_image_count;
+        image_count = current_frame_count;
     }
 
     if (swapchain_view_format != current_swapchain_view_format ||

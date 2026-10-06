@@ -463,7 +463,7 @@ abandoned` 仍在。正式配置的渲染、双手柄、核心和系统设置与
 136 秒记录四次深度冲突，修复版约 239 秒未记录同步冲突。线程采样
 确认修复版仍执行客体 CPU、Maxwell3D 绘制与异步呈现；两次均在一次
 SIGTERM 后退出码 0。验证层影响运行速度，此比较不作为性能基准。
-启动时的 0×0 交换链错误仍可复现，是待处理的另一条呈现生命周期路径；
+该检查点启动时的 0×0 交换链错误仍可复现，后续修复见下一节；
 未使用片元输出及 3D 图像 layerCount 的验证警告也仍在。
 
 本机原始记录为 `.cache/diagnostics/current-vulkan-validation-baseline-eden_log.txt`、
@@ -477,6 +477,50 @@ M5 Max 与 16 GiB 缓存预算正常识别，未记录新的映射、引用计�
 正常运行记录为 `texture-upload-sync-clean-startup-eden_log.txt`
 与 `texture-upload-sync-clean-startup-sample.txt`。
 本轮仍未验证最新双人分屏颜色或实际显示器帧节奏。
+
+### 零尺寸窗口与交换链恢复
+
+`1748d8b9bc` 的真实游戏启动可复现
+`VUID-VkSwapchainCreateInfoKHR-imageExtent-01689`：Metal surface 在初始化时
+报告 0×0，原代码仍尝试创建交换链。现在初次创建及重建都检查可用尺寸，
+暂时不可用时延后创建，后续帧重试；渲染窗口布局为零时跳过画面合成。
+
+呈现用的渲染帧池在初始化时保持 1–7 个槽位，暂时没有交换链时使用已查询的
+请求数量。帧池大小和帧图像格式此后保持不变，画面资源使用该帧池数量，
+避免交换链重建改变资源数量，或呈现线程与渲染线程并发读写格式。
+窗口暂时没有可用画面时，提交一个不含绘制命令的等待，消耗已经提交的
+`render_ready` 二进制信号量，并完成 `present_done` fence，再复用该帧。
+重建已有交换链时才等待设备空闲，然后释放旧交换链及信号量；正常帧不会
+为此增加设备空闲等待。
+
+`OUT_OF_DATE` 获取失败后立即返回重建，不读取旧图像索引；其他失败检查
+返回值。`SUBOPTIMAL` 仍代表成功取得图像，因此先呈现并消耗信号量，下一帧
+再重建。呈现本身返回 `SUBOPTIMAL` 时也会触发后续重建。
+
+独立诊断构建分别在同步、异步呈现下测试五种注入场景：初次短暂不可用、
+持续不可用、正常呈现后再次短暂不可用、成功获取后返回 `SUBOPTIMAL`，以及
+获取前返回 `OUT_OF_DATE`。实际 Vulkan 绘制、提交、信号量与 fence 操作仍在
+M5 Max 上执行，并启用同步验证。10 个进程共 130 项检查全部通过，均正常
+退出；跳过的帧全部回收，没有同步冲突、零尺寸创建或提前重建已取得图像。
+这些是受控返回值场景，不能代替所有原生窗口事件、显示器切换或游戏验证。
+诊断注入已从正式源码与可执行文件移除。
+
+正式应用构建成功，96 个着色器、fence、GPU 内存及 MemoryTracker 测试，
+58,518 条断言通过。移除注入后的验证运行约 503 秒，采样确认仍执行客体 CPU、
+Maxwell3D 绘制与异步呈现；未记录 critical Vulkan 验证回调、同步冲突或
+0×0 创建。关闭验证层后的无输入运行约 63 秒也观察到上述执行路径。
+两次均在一次 SIGTERM 后正常退出（退出码 0，无残留进程）。
+正式配置的 Renderer、Controls、Core、Cpu、System 与修改前一致，保留中文。
+
+原始记录保存在 `.cache/diagnostics/zero-swapchain-*-{async,sync}.json`、
+对应的 `-runner.txt` / `-eden_log.txt`，以及
+`zero-swapchain-clean-{validation,startup}-{eden_log,sample}.txt` 和
+`zero-swapchain-clean-tests.txt`。geometryShader / shaderCullDistance 能力
+错误、未使用片元输出及 3D 图像 layerCount 警告仍存在。
+退出阶段仍记录 `Force stopping EmuThread`，普通运行还记录
+`BufferQueue has been abandoned`，不能描述为日志完全无错误。
+Mac 锁屏期间没有发送游戏输入，最新分屏颜色、实际显示节奏、后续关卡及
+长时间游玩尚未验证，也没有新的卡顿改善测量。
 
 ### 固定缓冲映射冲突与通道绑定
 
