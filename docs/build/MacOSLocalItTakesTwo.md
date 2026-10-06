@@ -207,6 +207,16 @@ build/macos-core/bin/eden.app
 `EDEN_MOLTENVK_LIBRARY`、`EDEN_BUILD_DIR` 和 `EDEN_JOBS` 覆盖这些选择。
 完整依赖说明见 [Deps.md](../Deps.md)。
 
+### Vulkan 启动扩展检查
+
+直接加载 MoltenVK 时，实例可以不提供 Vulkan loader 的
+`VK_KHR_portability_enumeration` 扩展。原先检查这个可选扩展时调用了必需扩展
+检查函数，启动日志因此误报缺少必需扩展，实际仍能继续创建实例。
+现在按可选能力检查 portability enumeration 和 debug utils，仅在可用时启用。
+真正必需的 surface / Metal surface 扩展仍检查并在缺失时阻止创建实例。
+实例扩展列表只枚举一次，枚举失败会记录明确错误。
+这项修改改善启动诊断，不代表修复了游戏画面或提高了帧率。
+
 ## 简体中文界面
 
 本地构建启用 Qt 翻译，并将 Eden 与 Qt 标准对话框的翻译打包到应用中。
