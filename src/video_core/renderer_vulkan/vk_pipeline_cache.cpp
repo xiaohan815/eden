@@ -559,13 +559,24 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& variants{pair->second};
-    for (const auto& pipeline : variants) {
-        if (!pipeline || pipeline->MatchesTextureTypes(*kepler_compute, *gpu_memory)) {
-            return pipeline.get();
-        }
+    const auto cached = variants.Find(
+        [&](const ComputePipeline& pipeline) {
+            return pipeline.MatchesTextureTypes(*kepler_compute, *gpu_memory);
+        },
+        [&](const Shader::Specialization& failure) {
+            ComputeEnvironment env{*kepler_compute, *gpu_memory,
+                                   kepler_compute->regs.code_loc.Address(), qmd.program_start};
+            return env.MatchesSpecialization(failure);
+        });
+    if (cached) {
+        return *cached;
     }
-    variants.push_back(CreateComputePipeline(key, shader));
-    return variants.back().get();
+    auto pipeline = CreateComputePipeline(key, shader);
+    auto* result = pipeline.get();
+    if (pipeline || !device.IsMoltenVK()) {
+        variants.pipelines.push_back(std::move(pipeline));
+    }
+    return result;
 }
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -607,7 +618,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
-                compute_cache[key].push_back(std::move(pipeline));
+                compute_cache[key].pipelines.push_back(std::move(pipeline));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -656,7 +667,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
-                graphics_cache[key].push_back(std::move(pipeline));
+                graphics_cache[key].pipelines.push_back(std::move(pipeline));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -690,19 +701,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& variants{pair->second};
+    const auto cached = variants.Find(
+        [&](const GraphicsPipeline& pipeline) {
+            return pipeline.MatchesTextureTypes(*maxwell3d, *gpu_memory);
+        },
+        [&](const GraphicsFailure& failure) { return MatchesGraphicsFailure(failure); });
     GraphicsPipeline* pipeline{};
-    for (const auto& variant : variants) {
-        if (!variant) {
-            return nullptr;
+    if (cached) {
+        pipeline = *cached;
+    } else {
+        auto created = CreateGraphicsPipeline();
+        pipeline = created.get();
+        if (created || !device.IsMoltenVK()) {
+            variants.pipelines.push_back(std::move(created));
         }
-        if (variant->MatchesTextureTypes(*maxwell3d, *gpu_memory)) {
-            pipeline = variant.get();
-            break;
-        }
-    }
-    if (!pipeline) {
-        variants.push_back(CreateGraphicsPipeline());
-        pipeline = variants.back().get();
     }
     if (!pipeline) {
         return nullptr;
@@ -712,6 +724,22 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     current_pipeline = pipeline;
     return BuiltPipeline(current_pipeline);
+}
+
+bool PipelineCache::MatchesGraphicsFailure(const GraphicsFailure& failure) {
+    const auto& regs = maxwell3d->regs;
+    for (size_t index = 0; index < failure.size(); ++index) {
+        if (!failure[index]) {
+            continue;
+        }
+        // Only read the shader header and the recorded dependencies, not its full code.
+        GraphicsEnvironment env{*maxwell3d, *gpu_memory, static_cast<Maxwell::ShaderType>(index),
+                                regs.program_region.Address(), regs.pipelines[index].offset};
+        if (!env.MatchesSpecialization(*failure[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
@@ -869,6 +897,15 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     main_pools.ReleaseContents();
     auto pipeline{
         CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr, true)};
+    if (!pipeline && device.IsMoltenVK()) {
+        GraphicsFailure failure;
+        for (size_t index = 0; index < failure.size(); ++index) {
+            if (graphics_key.unique_hashes[index] != 0) {
+                failure[index] = environments.envs[index].GetSpecialization();
+            }
+        }
+        graphics_cache[graphics_key].failures.push_back(std::move(failure));
+    }
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }
@@ -894,6 +931,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
 
     main_pools.ReleaseContents();
     auto pipeline{CreateComputePipeline(main_pools, key, env, nullptr, true)};
+    if (!pipeline && device.IsMoltenVK()) {
+        compute_cache[key].failures.push_back(env.GetSpecialization());
+    }
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }

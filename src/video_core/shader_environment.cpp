@@ -152,6 +152,25 @@ GenericEnvironment::GenericEnvironment(Tegra::MemoryManager& gpu_memory_, GPUVAd
 
 GenericEnvironment::~GenericEnvironment() = default;
 
+Shader::Specialization GenericEnvironment::GetSpecialization() const {
+    return {
+        .stage = stage,
+        .texture_bound = texture_bound,
+        .local_memory_size = local_memory_size,
+        .shared_memory_size = shared_memory_size,
+        .workgroup_size = workgroup_size,
+        .gp_passthrough_mask = gp_passthrough_mask,
+        .has_hle_engine_state = has_hle_engine_state,
+        .viewport_transform_state = viewport_transform_read
+                                        ? std::optional{viewport_transform_state}
+                                        : std::nullopt,
+        .cbuf_values = {cbuf_values.begin(), cbuf_values.end()},
+        .texture_types = {texture_types.begin(), texture_types.end()},
+        .texture_pixel_formats = {texture_pixel_formats.begin(), texture_pixel_formats.end()},
+        .cbuf_replacements = {cbuf_replacement_queries.begin(), cbuf_replacement_queries.end()},
+    };
+}
+
 u32 GenericEnvironment::TextureBoundBuffer() const {
     return texture_bound;
 }
@@ -370,12 +389,14 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
 
 std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffer(u32 bank,
                                                                                   u32 offset) {
+    const u64 key = MakeCbufKey(bank, offset);
     if (!has_hle_engine_state) {
+        cbuf_replacement_queries.emplace(key, std::nullopt);
         return std::nullopt;
     }
-    const u64 key = (static_cast<u64>(bank) << 32) | static_cast<u64>(offset);
     auto it = maxwell3d->replace_table.find(key);
     if (it == maxwell3d->replace_table.end()) {
+        cbuf_replacement_queries.emplace(key, std::nullopt);
         return std::nullopt;
     }
     const auto converted_value = [](Tegra::Engines::Maxwell3D::HLEReplacementAttributeType name) {
@@ -391,6 +412,7 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
         }
     }(it->second);
     cbuf_replacements.emplace(key, converted_value);
+    cbuf_replacement_queries.emplace(key, converted_value);
     return converted_value;
 }
 
@@ -421,8 +443,23 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
     const auto& regs{maxwell3d->regs};
+    viewport_transform_read = true;
     viewport_transform_state = regs.viewport_scale_offset_enabled;
     return viewport_transform_state;
+}
+
+bool GraphicsEnvironment::MatchesSpecialization(const Shader::Specialization& specialization) {
+    const auto& regs = maxwell3d->regs;
+    return specialization.Matches(
+        *this,
+        [&](u32 bank) {
+            return maxwell3d->state.shader_stages[stage_index].const_buffers[bank].enabled;
+        },
+        [&](u32 raw) {
+            const auto handle = Tegra::Texture::TexturePair(
+                raw, regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding);
+            return handle.first <= regs.tex_header.limit;
+        });
 }
 
 ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
@@ -475,7 +512,18 @@ bool ComputeEnvironment::IsTexturePixelFormatInteger(u32 handle) {
 }
 
 u32 ComputeEnvironment::ReadViewportTransformState() {
+    viewport_transform_read = true;
     return viewport_transform_state;
+}
+
+bool ComputeEnvironment::MatchesSpecialization(const Shader::Specialization& specialization) {
+    const auto& qmd = kepler_compute->launch_description;
+    return specialization.Matches(
+        *this, [&](u32 bank) { return ((qmd.const_buffer_enable_mask.Value() >> bank) & 1) != 0; },
+        [&](u32 raw) {
+            const auto handle = Tegra::Texture::TexturePair(raw, qmd.linked_tsc != 0);
+            return handle.first <= kepler_compute->regs.tic.limit;
+        });
 }
 
 void FileEnvironment::Deserialize(std::ifstream& file) {

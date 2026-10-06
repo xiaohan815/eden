@@ -21,6 +21,7 @@
 #include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/specialization.h"
 #include "video_core/engines/maxwell_3d.h"
 
 namespace Tegra {
@@ -72,6 +73,8 @@ public:
 
     void Serialize(std::ofstream& file) const;
 
+    [[nodiscard]] Shader::Specialization GetSpecialization() const;
+
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
     }
@@ -90,6 +93,8 @@ protected:
     ankerl::unordered_dense::map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ankerl::unordered_dense::map<u64, u32> cbuf_values;
     ankerl::unordered_dense::map<u64, Shader::ReplaceConstant> cbuf_replacements;
+    ankerl::unordered_dense::map<u64, std::optional<Shader::ReplaceConstant>>
+        cbuf_replacement_queries;
 
     u32 local_memory_size{};
     u32 texture_bound{};
@@ -104,6 +109,7 @@ protected:
     u32 initial_offset = 0;
 
     u32 viewport_transform_state = 1;
+    bool viewport_transform_read = false;
 
     bool has_unbound_instructions = false;
     bool has_hle_engine_state = false;
@@ -131,6 +137,8 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    bool MatchesSpecialization(const Shader::Specialization& specialization);
+
 private:
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
@@ -156,9 +164,12 @@ public:
     u32 ReadViewportTransformState() override;
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(
-        [[maybe_unused]] u32 bank, [[maybe_unused]] u32 offset) override {
+        u32 bank, u32 offset) override {
+        cbuf_replacement_queries.emplace((static_cast<u64>(bank) << 32) | offset, std::nullopt);
         return std::nullopt;
     }
+
+    bool MatchesSpecialization(const Shader::Specialization& specialization);
 
 private:
     Tegra::Engines::KeplerCompute* kepler_compute{};

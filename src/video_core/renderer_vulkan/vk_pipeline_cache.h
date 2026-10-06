@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <ankerl/unordered_dense.h>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "shader_recompiler/profile.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/pipeline_variants.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -121,6 +123,10 @@ private:
 
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
 
+    using GraphicsFailure =
+        std::array<std::optional<Shader::Specialization>, Maxwell::MaxShaderProgram>;
+    bool MatchesGraphicsFailure(const GraphicsFailure& failure);
+
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
@@ -157,11 +163,12 @@ private:
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
 
-    // Retain variants so queued GPU work can continue using the previous scalar types.
     ankerl::unordered_dense::map<ComputePipelineCacheKey,
-                                std::vector<std::unique_ptr<ComputePipeline>>> compute_cache;
+                                VideoCommon::PipelineVariants<ComputePipeline, Shader::Specialization>>
+        compute_cache;
     ankerl::unordered_dense::map<GraphicsPipelineCacheKey,
-                                std::vector<std::unique_ptr<GraphicsPipeline>>> graphics_cache;
+                                VideoCommon::PipelineVariants<GraphicsPipeline, GraphicsFailure>>
+        graphics_cache;
 
     ShaderPools main_pools;
 

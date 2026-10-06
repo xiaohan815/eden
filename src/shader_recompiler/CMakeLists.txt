@@ -79,6 +79,7 @@ add_library(shader_recompiler STATIC
     backend/spirv/spirv_emit_context.cpp
     backend/spirv/spirv_emit_context.h
     environment.h
+    specialization.h
     texture_types.h
     exception.h
     frontend/ir/abstract_syntax_list.h
