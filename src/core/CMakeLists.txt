@@ -46,6 +46,7 @@ add_library(core STATIC
     device_memory.h
     device_memory_manager.h
     device_memory_manager.inc
+    device_memory_span.h
     file_sys/bis_factory.cpp
     file_sys/bis_factory.h
     file_sys/card_image.cpp

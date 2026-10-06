@@ -1958,9 +1958,7 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr, 
 
 template <class P>
 std::span<const u8> BufferCache<P>::ImmediateBufferWithData(DAddr device_addr, size_t size) {
-    u8* const base_pointer = device_memory.GetPointer<u8>(device_addr);
-    if (IsRangeGranular(device_addr, size) ||
-        base_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) {
+    if (u8* const base_pointer = device_memory.GetSpan(device_addr, size); base_pointer != nullptr) {
         return std::span(base_pointer, size);
     } else {
         const std::span<u8> span = ImmediateBuffer(size);

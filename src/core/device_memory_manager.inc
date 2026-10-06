@@ -16,10 +16,10 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
-#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
+#include "core/device_memory_span.h"
 #include "core/memory.h"
 
 namespace Core {
@@ -297,9 +297,11 @@ void DeviceMemoryManager<Traits>::TrackContinuityImpl(DAddr address, VAddr virtu
 }
 template <typename Traits>
 u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::size_t size) {
-    size_t page_index = src_addr >> page_bits;
-    size_t subbits = src_addr & page_mask;
-    if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker) << page_bits) >= size + subbits) {
+    if ((src_addr >> page_bits) >= tracked_entries.size()) {
+        return nullptr;
+    }
+    const std::span<const TrackedEntry> pages{tracked_entries.data(), tracked_entries.size()};
+    if (DeviceMemorySpanSize<page_bits>(pages, src_addr, size) == size) {
         return GetPointer<u8>(src_addr);
     }
     return nullptr;
@@ -307,9 +309,11 @@ u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::size_t
 
 template <typename Traits>
 const u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::size_t size) const {
-    size_t page_index = src_addr >> page_bits;
-    size_t subbits = src_addr & page_mask;
-    if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker) << page_bits) >= size + subbits) {
+    if ((src_addr >> page_bits) >= tracked_entries.size()) {
+        return nullptr;
+    }
+    const std::span<const TrackedEntry> pages{tracked_entries.data(), tracked_entries.size()};
+    if (DeviceMemorySpanSize<page_bits>(pages, src_addr, size) == size) {
         return GetPointer<u8>(src_addr);
     }
     return nullptr;
@@ -333,6 +337,9 @@ template <typename Traits>
 template <typename T>
 T* DeviceMemoryManager<Traits>::GetPointer(DAddr address) {
     const size_t index = address >> Memory::YUZU_PAGEBITS;
+    if (index >= tracked_entries.size()) {
+        return nullptr;
+    }
     const size_t offset = address & Memory::YUZU_PAGEMASK;
     auto phys_addr = tracked_entries[index].compressed_physical_ptr;
     if (phys_addr == 0) [[unlikely]]
@@ -344,6 +351,9 @@ template <typename Traits>
 template <typename T>
 const T* DeviceMemoryManager<Traits>::GetPointer(DAddr address) const {
     const size_t index = address >> Memory::YUZU_PAGEBITS;
+    if (index >= tracked_entries.size()) {
+        return nullptr;
+    }
     const size_t offset = address & Memory::YUZU_PAGEMASK;
     auto phys_addr = tracked_entries[index].compressed_physical_ptr;
     if (phys_addr == 0)
@@ -374,36 +384,23 @@ T DeviceMemoryManager<Traits>::Read(DAddr address) const {
 }
 
 template <typename Traits>
-void DeviceMemoryManager<Traits>::WalkBlock(DAddr addr, std::size_t size, auto on_unmapped, auto on_memory, auto increment) {
-    std::size_t remaining_size = size;
-    std::size_t page_index = addr >> Memory::YUZU_PAGEBITS;
-    std::size_t page_offset = addr & Memory::YUZU_PAGEMASK;
-    while (remaining_size) {
-        const size_t next_pages = std::size_t(tracked_entries[page_index].continuity_tracker);
-        const std::size_t copy_amount = (std::min)((next_pages << Memory::YUZU_PAGEBITS) - page_offset, remaining_size);
-        const auto current_vaddr = u64((page_index << Memory::YUZU_PAGEBITS) + page_offset);
-        SCOPE_EXIT{
-            page_index += next_pages;
-            page_offset = 0;
-            increment(copy_amount);
-            remaining_size -= copy_amount;
-        };
-
-        auto phys_addr = tracked_entries[page_index].compressed_physical_ptr;
-        if (phys_addr == 0) {
-            on_unmapped(copy_amount, current_vaddr);
-            continue;
-        }
-        auto* mem_ptr = GetPointerFromRaw<u8>((PAddr(phys_addr - 1) << Memory::YUZU_PAGEBITS) + page_offset);
-        on_memory(copy_amount, mem_ptr);
-    }
+void DeviceMemoryManager<Traits>::WalkBlock(DAddr addr, std::size_t size, auto on_unmapped,
+                                         auto on_memory, auto increment) {
+    WalkDeviceMemory<page_bits>(
+        std::span<const TrackedEntry>{tracked_entries.data(), tracked_entries.size()}, addr, size,
+        on_unmapped,
+        [&](size_t copy_amount, PAddr physical_address) {
+            on_memory(copy_amount, GetPointerFromRaw<u8>(physical_address));
+        },
+        increment);
 }
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, size_t size) {
     device_inter->FlushRegion(address, size);
     const std::size_t page_offset = address & Memory::YUZU_PAGEMASK;
-    if (size <= Memory::YUZU_PAGESIZE - page_offset) {
+    if (size <= Memory::YUZU_PAGESIZE - page_offset &&
+        (address >> page_bits) < tracked_entries.size()) {
         const DAddr guest_page = address & ~static_cast<DAddr>(Memory::YUZU_PAGEMASK);
         for (size_t i = 0; i < 4; ++i) {
             if (t_slot[i].guest_page == guest_page && t_slot[i].host_ptr != nullptr) {
@@ -461,7 +458,8 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
 template <typename Traits>
 void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size) {
     const std::size_t page_offset = address & Memory::YUZU_PAGEMASK;
-    if (size <= Memory::YUZU_PAGESIZE - page_offset) {
+    if (size <= Memory::YUZU_PAGESIZE - page_offset &&
+        (address >> page_bits) < tracked_entries.size()) {
         const DAddr guest_page = address & ~static_cast<DAddr>(Memory::YUZU_PAGEMASK);
         for (size_t i = 0; i < 4; ++i) {
             if (t_slot[i].guest_page == guest_page && t_slot[i].host_ptr != nullptr) {
