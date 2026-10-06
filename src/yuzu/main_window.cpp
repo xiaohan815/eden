@@ -164,13 +164,14 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include <unistd.h> // for chdir
 #endif
 
-#ifdef __unix__
-
+#if defined(__unix__) || defined(__APPLE__)
 #include <csignal>
 #include <QSocketNotifier>
 #include <sys/socket.h>
-#include "qt_common/gui_settings.h"
+#endif
 
+#ifdef __unix__
+#include "qt_common/gui_settings.h"
 #endif
 
 #include "qt_common/gamemode.h"
@@ -438,7 +439,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
     }
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
     SetupSigInterrupts();
 #endif
 
@@ -708,7 +709,7 @@ MainWindow::~MainWindow() {
         delete render_window;
     }
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
     ::close(sig_interrupt_fds[0]);
     ::close(sig_interrupt_fds[1]);
 #endif
@@ -1835,7 +1836,7 @@ void MainWindow::OnPrepareForSleep(bool prepare_sleep) {
     }
 }
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
 std::array<int, 3> MainWindow::sig_interrupt_fds{0, 0, 0};
 
 void MainWindow::SetupSigInterrupts() {
@@ -1845,7 +1846,7 @@ void MainWindow::SetupSigInterrupts() {
     socketpair(AF_UNIX, SOCK_STREAM, 0, sig_interrupt_fds.data());
     sig_interrupt_fds[2] = 1;
 
-    struct sigaction sa;
+    struct sigaction sa{};
     sa.sa_handler = &MainWindow::HandleSigInterrupt;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESETHAND;
@@ -1881,7 +1882,7 @@ void MainWindow::OnSigInterruptNotifierActivated() {
 
     emit SigInterrupt();
 }
-#endif // __unix__
+#endif // __unix__ || __APPLE__
 
 void MainWindow::PreventOSSleep() {
 #ifdef _WIN32

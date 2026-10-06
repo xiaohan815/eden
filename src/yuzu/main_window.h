@@ -30,9 +30,12 @@
 
 #ifdef __unix__
 #include <QDBusObjectPath>
-#include <QSocketNotifier>
 #include <QVariant>
 #include <QtDBus/QDBusInterface>
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <QSocketNotifier>
 #endif
 
 #ifdef ENABLE_UPDATE_CHECKER
@@ -324,7 +327,7 @@ private:
     std::string CreateTASFramesString(
         std::array<size_t, InputCommon::TasInput::PLAYER_NUMBER> frames) const;
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
     void SetupSigInterrupts();
     static void HandleSigInterrupt(int);
     void OnSigInterruptNotifierActivated();
@@ -589,7 +592,7 @@ private:
     // True if TAS recording dialog is visible
     bool is_tas_recording_dialog_active{};
 
-#ifdef __unix__
+#if defined(__unix__) || defined(__APPLE__)
     QSocketNotifier* sig_interrupt_notifier;
     static std::array<int, 3> sig_interrupt_fds;
 #endif
