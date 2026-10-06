@@ -131,6 +131,12 @@ int main(int argc, char* argv[]) {
 #endif // _WIN32
 
 #if defined(__APPLE__)
+    // MoltenVK presents directly to the Metal layer. Qt's transaction-managed
+    // layer waits for Qt to present it, which conflicts with Vulkan presentation.
+    if (!qEnvironmentVariableIsSet("QT_MTL_NO_TRANSACTION")) {
+        qputenv("QT_MTL_NO_TRANSACTION", "1");
+    }
+
     // If you start a bundle (binary) on OSX without the Terminal, the working directory is "/".
     // But since we require the working directory to be the executable path for the location of
     // the user folder in the Qt Frontend, we need to cd into that working directory
