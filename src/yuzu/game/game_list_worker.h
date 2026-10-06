@@ -7,8 +7,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <QList>
@@ -16,7 +18,6 @@
 #include <QRunnable>
 #include <QString>
 
-#include "common/thread.h"
 #include "core/file_sys/registered_cache.h"
 #include "frontend_common/play_time_manager.h"
 #include "qt_common/config/uisettings.h"
@@ -64,6 +65,9 @@ public:
      */
     void ProcessEvents(GameList* game_list);
 
+    /// Waits until the worker has finished updating the shared content provider.
+    void WaitForCompletion();
+
 signals:
     void DataAvailable();
 
@@ -94,7 +98,7 @@ private:
     std::condition_variable cv;
     std::deque<std::function<void(GameList*)>> queued_events;
     std::atomic_bool stop_requested = false;
-    Common::Event processing_completed;
+    bool processing_completed = false;
 
     Core::System& system;
 };

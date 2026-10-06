@@ -1096,6 +1096,13 @@ void GameList::PopulateAsync(QVector<UISettings::GameDir>& game_dirs) {
     QThreadPool::globalInstance()->start(current_worker.get());
 }
 
+void GameList::WaitForPopulation() {
+    if (current_worker) {
+        current_worker->WaitForCompletion();
+        current_worker->ProcessEvents(this);
+    }
+}
+
 void GameList::SaveInterfaceLayout() {
     UISettings::values.gamelist_header_state = tree_view->header()->saveState();
 }

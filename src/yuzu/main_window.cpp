@@ -2065,6 +2065,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
 
     last_filename_booted = filename;
 
+    // The scan clears and repopulates the provider used to select both ExeFS and
+    // RomFS. Finish it before registering the launch file and selecting updates.
+    game_list->WaitForPopulation();
     ConfigureFilesystemProvider(filename.toStdString());
     const auto v_file = Core::GetGameFileFromPath(QtCommon::vfs, filename.toUtf8().constData());
     const auto loader =

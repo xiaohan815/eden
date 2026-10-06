@@ -246,7 +246,12 @@ GameListWorker::GameListWorker(FileSys::VirtualFilesystem vfs_,
 GameListWorker::~GameListWorker() {
     this->disconnect();
     stop_requested.store(true);
-    processing_completed.Wait();
+    WaitForCompletion();
+}
+
+void GameListWorker::WaitForCompletion() {
+    std::unique_lock lk{lock};
+    cv.wait(lk, [this] { return processing_completed; });
 }
 
 void GameListWorker::ProcessEvents(GameList* game_list) {
@@ -491,5 +496,8 @@ void GameListWorker::run() {
     }
 
     RecordEvent([this](GameList* game_list) { game_list->DonePopulating(watch_list); });
-    processing_completed.Set();
+    // Keep the worker alive until notification has returned, including during destruction.
+    std::scoped_lock lk{lock};
+    processing_completed = true;
+    cv.notify_all();
 }

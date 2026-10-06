@@ -87,6 +87,9 @@ public:
     void LoadCompatibilityList();
     void PopulateAsync(QVector<UISettings::GameDir>& game_dirs);
 
+    /// Completes a pending scan before the content provider is used to launch a game.
+    void WaitForPopulation();
+
     void SaveInterfaceLayout();
     void LoadInterfaceLayout();
 
