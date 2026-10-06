@@ -48,7 +48,6 @@ MemoryManager::MemoryManager(Core::System& system_, MaxwellDeviceMemoryManager& 
 
     big_entries.resize(big_page_table_size / 32, 0);
     big_page_table_dev.resize(big_page_table_size);
-    big_page_continuous.resize(big_page_table_size / continuous_bits, 0);
     entries.resize(page_table_size / 32, 0);
 }
 
@@ -95,19 +94,6 @@ PTEKind MemoryManager::GetPageKind(GPUVAddr gpu_addr) const {
     return kind_map.GetValueAt(gpu_addr);
 }
 
-inline bool MemoryManager::IsBigPageContinuous(size_t big_page_index) const {
-    const u64 entry_mask = big_page_continuous[big_page_index / continuous_bits];
-    const size_t sub_index = big_page_index % continuous_bits;
-    return ((entry_mask >> sub_index) & 0x1ULL) != 0;
-}
-
-inline void MemoryManager::SetBigPageContinuous(size_t big_page_index, bool value) {
-    const u64 continuous_mask = big_page_continuous[big_page_index / continuous_bits];
-    const size_t sub_index = big_page_index % continuous_bits;
-    big_page_continuous[big_page_index / continuous_bits] =
-        (~(1ULL << sub_index) & continuous_mask) | (value ? 1ULL << sub_index : 0);
-}
-
 template <MemoryManager::EntryType entry_type>
 GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size,
                                     PTEKind kind) {
@@ -150,23 +136,6 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
             const auto index = PageEntryIndex<true>(current_gpu_addr);
             const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
             big_page_table_dev[index] = sub_value;
-            const bool is_continuous = ([&] {
-                uintptr_t base_ptr{
-                    reinterpret_cast<uintptr_t>(memory.GetPointer<u8>(current_dev_addr))};
-                if (base_ptr == 0) {
-                    return false;
-                }
-                for (DAddr start_cpu = current_dev_addr + page_size;
-                     start_cpu < current_dev_addr + big_page_size; start_cpu += page_size) {
-                    base_ptr += page_size;
-                    auto next_ptr = reinterpret_cast<uintptr_t>(memory.GetPointer<u8>(start_cpu));
-                    if (next_ptr == 0 || base_ptr != next_ptr) {
-                        return false;
-                    }
-                }
-                return true;
-            })();
-            SetBigPageContinuous(index, is_continuous);
         }
         remaining_size -= big_page_size;
     }
@@ -381,8 +350,7 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         if constexpr (is_safe) {
             rasterizer->FlushRegion(dev_addr_base, copy_amount, which);
         }
-        u8* physical = memory.GetPointer<u8>(dev_addr_base);
-        std::memcpy(dest_buffer, physical, copy_amount);
+        memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
         dest_buffer = static_cast<u8*>(dest_buffer) + copy_amount;
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
@@ -391,12 +359,8 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         if constexpr (is_safe) {
             rasterizer->FlushRegion(dev_addr_base, copy_amount, which);
         }
-        if (!IsBigPageContinuous(page_index)) [[unlikely]] {
-            memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
-        } else {
-            u8* physical = memory.GetPointer<u8>(dev_addr_base);
-            std::memcpy(dest_buffer, physical, copy_amount);
-        }
+        // Device mappings can change independently of this GPU page table.
+        memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
         dest_buffer = static_cast<u8*>(dest_buffer) + copy_amount;
     };
     auto read_short_pages = [&](std::size_t page_index, std::size_t offset,
@@ -430,8 +394,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         if constexpr (is_safe) {
             rasterizer->InvalidateRegion(dev_addr_base, copy_amount, which);
         }
-        u8* physical = memory.GetPointer<u8>(dev_addr_base);
-        std::memcpy(physical, src_buffer, copy_amount);
+        memory.WriteBlockUnsafe(dev_addr_base, src_buffer, copy_amount);
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
@@ -440,12 +403,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         if constexpr (is_safe) {
             rasterizer->InvalidateRegion(dev_addr_base, copy_amount, which);
         }
-        if (!IsBigPageContinuous(page_index)) [[unlikely]] {
-            memory.WriteBlockUnsafe(dev_addr_base, src_buffer, copy_amount);
-        } else {
-            u8* physical = memory.GetPointer<u8>(dev_addr_base);
-            std::memcpy(physical, src_buffer, copy_amount);
-        }
+        memory.WriteBlockUnsafe(dev_addr_base, src_buffer, copy_amount);
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
     auto write_short_pages = [&](std::size_t page_index, std::size_t offset,
@@ -602,20 +560,7 @@ void MemoryManager::CopyBlock(GPUVAddr gpu_dest_addr, GPUVAddr gpu_src_addr, std
 }
 
 bool MemoryManager::IsGranularRange(GPUVAddr gpu_addr, std::size_t size) const {
-    if (GetEntry<true>(gpu_addr) == EntryType::Mapped) [[likely]] {
-        size_t page_index = gpu_addr >> big_page_bits;
-        if (IsBigPageContinuous(page_index)) [[likely]] {
-            const std::size_t page{(page_index & big_page_mask) + size};
-            return page <= big_page_size;
-        }
-        const std::size_t page{(gpu_addr & Core::DEVICE_PAGEMASK) + size};
-        return page <= Core::DEVICE_PAGESIZE;
-    }
-    if (GetEntry<false>(gpu_addr) != EntryType::Mapped) {
-        return false;
-    }
-    const std::size_t page{(gpu_addr & Core::DEVICE_PAGEMASK) + size};
-    return page <= Core::DEVICE_PAGESIZE;
+    return GetSpan(gpu_addr, size) != nullptr;
 }
 
 bool MemoryManager::IsContinuousRange(GPUVAddr gpu_addr, std::size_t size) const {

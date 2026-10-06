@@ -181,9 +181,6 @@ private:
         }
     }
 
-    inline bool IsBigPageContinuous(size_t big_page_index) const;
-    inline void SetBigPageContinuous(size_t big_page_index, bool value);
-
     template <bool is_gpu_address>
     void GetSubmappedRangeImpl(
         GPUVAddr gpu_addr, std::size_t size,
@@ -237,13 +234,10 @@ private:
     Common::RangeMap<GPUVAddr, PTEKind> kind_map;
     Common::VirtualBuffer<u32> big_page_table_dev;
 
-    std::vector<u64> big_page_continuous;
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash{};
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash2{};
 
     mutable std::mutex guard;
-
-    static constexpr size_t continuous_bits = 64;
 
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
