@@ -106,6 +106,9 @@ public:
     explicit ThreadManager(Core::System& system_, bool is_async_);
     ~ThreadManager();
 
+    /// Stops GPU command processing before its renderer and channel state are destroyed.
+    void Stop();
+
     /// Creates and starts the GPU thread.
     void StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context,
                      Tegra::Control::Scheduler& scheduler);

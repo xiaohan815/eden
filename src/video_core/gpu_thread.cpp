@@ -22,7 +22,16 @@ namespace VideoCommon::GPUThread {
 ThreadManager::ThreadManager(Core::System& system_, bool is_async_)
     : system{system_}, is_async{is_async_} {}
 
-ThreadManager::~ThreadManager() = default;
+ThreadManager::~ThreadManager() {
+    Stop();
+}
+
+void ThreadManager::Stop() {
+    if (thread.joinable()) {
+        thread.request_stop();
+        thread.join();
+    }
+}
 
 void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {
     rasterizer = renderer.ReadRasterizer();
