@@ -19,6 +19,7 @@ add_executable(tests
     common/unique_function.cpp
     core/core_timing.cpp
     core/device_memory_span.cpp
+    core/perf_stats.cpp
     core/internal_network/network.cpp
     video_core/memory_budget.cpp
     video_core/gpu_memory.cpp

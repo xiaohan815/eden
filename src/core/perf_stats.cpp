@@ -33,7 +33,7 @@ namespace Core {
 PerfStats::PerfStats(u64 title_id_) : title_id(title_id_) {}
 
 PerfStats::~PerfStats() {
-    if (!Settings::values.record_frame_times || title_id == 0) {
+    if (!Settings::values.record_frame_times || title_id == 0 || current_index <= IgnoreFrames) {
         return;
     }
 
