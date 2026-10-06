@@ -129,6 +129,9 @@ public:
      */
     void AllocateFixed(VaType virt, VaType size);
 
+    /// Reserves a free, in-bounds interval without overwriting existing allocations.
+    [[nodiscard]] bool TryAllocateFixed(VaType virt, VaType size);
+
     /**
      * @brief Frees an AS region so it can be used again
      */

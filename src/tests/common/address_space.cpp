@@ -109,3 +109,68 @@ TEST_CASE("Address allocator respects live ranges in a byte model", "[address_al
         live.emplace_back(address, size);
     }
 }
+
+TEST_CASE("Fixed allocation rejects occupied and invalid intervals", "[address_allocator]") {
+    Allocator allocator{16, 128};
+    REQUIRE(allocator.TryAllocateFixed(48, 16));
+    CHECK_FALSE(allocator.TryAllocateFixed(48, 16));
+    CHECK_FALSE(allocator.TryAllocateFixed(40, 32));
+    CHECK_FALSE(allocator.TryAllocateFixed(56, 16));
+    CHECK_FALSE(allocator.TryAllocateFixed(8, 16));
+    CHECK_FALSE(allocator.TryAllocateFixed(128, 1));
+    CHECK_FALSE(allocator.TryAllocateFixed(120, 16));
+    CHECK_FALSE(allocator.TryAllocateFixed(32, 0));
+    CHECK_FALSE(allocator.TryAllocateFixed(32, ~u32{0}));
+    CHECK(allocator.Allocate(32) == 16);
+    CHECK(allocator.Allocate(16) == 64);
+    allocator.Free(48, 16);
+    CHECK(allocator.TryAllocateFixed(48, 16));
+}
+
+TEST_CASE("Fixed allocations may touch existing allocations and the AS limit",
+          "[address_allocator]") {
+    Allocator allocator{16, 128};
+    REQUIRE(allocator.TryAllocateFixed(48, 16));
+    CHECK(allocator.TryAllocateFixed(16, 32));
+    CHECK(allocator.TryAllocateFixed(64, 64));
+    CHECK(allocator.Allocate(1) == 0);
+    allocator.Free(64, 64);
+    CHECK(allocator.Allocate(64) == 64);
+}
+
+TEST_CASE("Checked fixed allocations agree with an independent occupancy model",
+          "[address_allocator]") {
+    Allocator allocator{16, 128};
+    std::array<bool, 128> used{};
+    std::vector<std::pair<u32, u32>> live;
+    std::mt19937 random{0xEDE04};
+    for (size_t step = 0; step < 300; ++step) {
+        if (!live.empty() && random() % 4 == 0) {
+            const size_t index = random() % live.size();
+            const auto [address, size] = live[index];
+            allocator.Free(address, size);
+            std::fill_n(used.begin() + address, size, false);
+            live.erase(live.begin() + index);
+            continue;
+        }
+        const u32 address = random() % 144;
+        const u32 size = random() % 40;
+        bool available =
+            address >= 16 && address < used.size() && size != 0 && size <= used.size() - address;
+        if (available) {
+            available = std::none_of(used.begin() + address, used.begin() + address + size,
+                                     [](bool value) { return value; });
+        }
+        INFO("step=" << step << " address=" << address << " size=" << size);
+        CHECK(allocator.TryAllocateFixed(address, size) == available);
+        if (available) {
+            std::fill_n(used.begin() + address, size, true);
+            live.emplace_back(address, size);
+        }
+    }
+    for (const auto& [address, size] : live) {
+        allocator.Free(address, size);
+    }
+    CHECK(allocator.Allocate(112) == 16);
+    CHECK(allocator.Allocate(1) == 0);
+}

@@ -335,6 +335,23 @@ ALLOC_MEMBER(void)::AllocateFixed(VaType virt, VaType size) {
     this->Map(virt, true, size);
 }
 
+ALLOC_MEMBER(bool)::TryAllocateFixed(VaType virt, VaType size) {
+    std::scoped_lock lock(this->block_mutex);
+    if (virt == UnmappedVa || virt < virt_start || virt >= this->va_limit || size == 0 ||
+        size > this->va_limit - virt) {
+        return false;
+    }
+    const auto block = std::prev(
+        std::upper_bound(this->blocks.begin(), this->blocks.end(), virt,
+                         [](VaType address, const auto& entry) { return address < entry.virt; }));
+    const auto next = std::next(block);
+    if (block->Mapped() || (next != this->blocks.end() && size > next->virt - virt)) {
+        return false;
+    }
+    this->MapLocked(virt, true, size, {});
+    return true;
+}
+
 ALLOC_MEMBER(void)::Free(VaType virt, VaType size) {
     this->Unmap(virt, size);
 }

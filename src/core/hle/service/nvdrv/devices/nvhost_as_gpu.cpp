@@ -106,29 +106,32 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
         return NvResult::InvalidState;
     }
 
-    if (params.big_page_size) {
-        if (!std::has_single_bit(params.big_page_size)) {
-            LOG_ERROR(Service_NVDRV, "Non power-of-2 big page size: {:#X}!", params.big_page_size);
-            return NvResult::BadValue;
-        }
-
-        if ((params.big_page_size & VM::SUPPORTED_BIG_PAGE_SIZES) == 0) {
-            LOG_ERROR(Service_NVDRV, "Unsupported big page size: {:#X}!", params.big_page_size);
-            return NvResult::BadValue;
-        }
-
-        vm.big_page_size = params.big_page_size;
-        vm.big_page_size_bits = static_cast<u32>(std::countr_zero(params.big_page_size));
-
-        vm.va_range_start = params.big_page_size << VM::VA_START_SHIFT;
+    const u32 big_page_size =
+        params.big_page_size ? static_cast<u32>(params.big_page_size) : VM::DEFAULT_BIG_PAGE_SIZE;
+    if (!std::has_single_bit(big_page_size) ||
+        (big_page_size & VM::SUPPORTED_BIG_PAGE_SIZES) == 0) {
+        LOG_ERROR(Service_NVDRV, "Unsupported big page size: {:#X}", big_page_size);
+        return NvResult::BadValue;
     }
-
-    // If this is unspecified then default values should be used
-    if (params.va_range_start) {
-        vm.va_range_start = params.va_range_start;
-        vm.va_range_split = params.va_range_split;
-        vm.va_range_end = params.va_range_end;
+    const u64 range_start = params.va_range_start ? static_cast<u64>(params.va_range_start)
+                                                  : u64{big_page_size} << VM::VA_START_SHIFT;
+    const u64 range_split =
+        params.va_range_start ? static_cast<u64>(params.va_range_split) : VM::DEFAULT_VA_SPLIT;
+    const u64 range_end =
+        params.va_range_start ? static_cast<u64>(params.va_range_end) : VM::DEFAULT_VA_RANGE;
+    // Maxwell GPU virtual addresses are at most 40 bits. Validate before
+    // narrowing page indices or constructing the page tables and allocators.
+    if (range_start == 0 || range_start >= range_split || range_split >= range_end ||
+        range_end > (u64{1} << 40) || !Common::IsAligned(range_start, VM::YUZU_PAGESIZE) ||
+        !Common::IsAligned(range_split, big_page_size) ||
+        !Common::IsAligned(range_end, big_page_size)) {
+        return NvResult::BadValue;
     }
+    vm.big_page_size = big_page_size;
+    vm.big_page_size_bits = static_cast<u32>(std::countr_zero(big_page_size));
+    vm.va_range_start = range_start;
+    vm.va_range_split = range_split;
+    vm.va_range_end = range_end;
 
     const u64 max_big_page_bits = Common::Log2Ceil64(vm.va_range_end);
 
@@ -137,8 +140,7 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     vm.small_page_allocator.emplace(start_pages, end_pages);
 
     const auto start_big_pages{static_cast<u32>(vm.va_range_split >> vm.big_page_size_bits)};
-    const auto end_big_pages{
-        static_cast<u32>((vm.va_range_end - vm.va_range_split) >> vm.big_page_size_bits)};
+    const auto end_big_pages{static_cast<u32>(vm.va_range_end >> vm.big_page_size_bits)};
     vm.big_page_allocator.emplace(start_big_pages, end_big_pages);
 
     gmmu = std::make_shared<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split,
@@ -175,12 +177,24 @@ NvResult nvhost_as_gpu::AllocateSpace(IoctlAllocSpace& params) {
     auto& allocator{params.page_size == VM::YUZU_PAGESIZE ? *vm.small_page_allocator
                                                           : *vm.big_page_allocator};
 
+    if (params.pages == 0) {
+        return NvResult::BadValue;
+    }
     if ((params.flags & MappingFlags::Fixed) != MappingFlags::None) {
-        allocator.AllocateFixed(static_cast<u32>(params.offset >> page_size_bits), params.pages);
+        const u64 offset = params.offset;
+        const u64 first = u64{allocator.GetVAStart()} << page_size_bits;
+        const u64 end = u64{allocator.GetVALimit()} << page_size_bits;
+        const u64 size = u64{params.pages} * params.page_size;
+        if (!Common::IsAligned(offset, params.page_size) || offset < first || offset >= end ||
+            size > end - offset) {
+            return NvResult::BadValue;
+        }
+        if (!allocator.TryAllocateFixed(static_cast<u32>(offset >> page_size_bits), params.pages)) {
+            return NvResult::AlreadyAllocated;
+        }
     } else {
         params.offset = static_cast<u64>(allocator.Allocate(params.pages)) << page_size_bits;
         if (!params.offset) {
-            ASSERT_MSG(false, "Failed to allocate free space in the GPU AS!");
             return NvResult::InsufficientMemory;
         }
     }
@@ -421,7 +435,9 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
     const s64 buffer_offset = params.buffer_offset;
     const u64 size =
         params.mapping_size ? static_cast<u64>(params.mapping_size) : handle->orig_size;
-    if (buffer_offset < 0 || size == 0 || static_cast<u64>(buffer_offset) > handle->aligned_size ||
+    if (buffer_offset < 0 ||
+        !Common::IsAligned(static_cast<u64>(buffer_offset), VM::YUZU_PAGESIZE) || size == 0 ||
+        static_cast<u64>(buffer_offset) > handle->aligned_size ||
         size > handle->aligned_size - static_cast<u64>(buffer_offset)) {
         LOG_WARNING(Service_NVDRV, "Cannot map a region outside the nvmap handle");
         return NvResult::BadValue;
@@ -435,7 +451,8 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
     Allocation* allocation{};
 
     if ((params.flags & MappingFlags::Fixed) != MappingFlags::None) {
-        if (params.offset < 0) {
+        if (params.offset < 0 ||
+            !Common::IsAligned(static_cast<u64>(params.offset), VM::YUZU_PAGESIZE)) {
             return NvResult::BadValue;
         }
         auto alloc{allocation_map.upper_bound(params.offset)};
@@ -453,8 +470,13 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
         }
     }
 
-    const u32 page_size = use_big_pages ? vm.big_page_size : VM::YUZU_PAGESIZE;
-    const u32 page_size_bits = use_big_pages ? vm.big_page_size_bits : VM::PAGE_SIZE_BITS;
+    // A fixed mapping consumes no new allocator pages. Preserve its exact
+    // small-page coverage; MapRange keeps aligned interior big pages available.
+    const u32 page_size =
+        allocation ? VM::YUZU_PAGESIZE : (use_big_pages ? vm.big_page_size : VM::YUZU_PAGESIZE);
+    const u32 page_size_bits = allocation
+                                   ? VM::PAGE_SIZE_BITS
+                                   : (use_big_pages ? vm.big_page_size_bits : VM::PAGE_SIZE_BITS);
     if (size > std::numeric_limits<u64>::max() - (page_size - 1)) {
         return NvResult::BadValue;
     }
@@ -538,13 +560,13 @@ void nvhost_as_gpu::GetVARegionsImpl(IoctlGetVaRegions& params) {
 
     params.regions = std::array<VaRegion, 2>{
         VaRegion{
-            .offset = vm.small_page_allocator->GetVAStart() << VM::PAGE_SIZE_BITS,
+            .offset = u64{vm.small_page_allocator->GetVAStart()} << VM::PAGE_SIZE_BITS,
             .page_size = VM::YUZU_PAGESIZE,
             ._pad0_{},
             .pages = vm.small_page_allocator->GetVALimit() - vm.small_page_allocator->GetVAStart(),
         },
         VaRegion{
-            .offset = vm.big_page_allocator->GetVAStart() << vm.big_page_size_bits,
+            .offset = u64{vm.big_page_allocator->GetVAStart()} << vm.big_page_size_bits,
             .page_size = vm.big_page_size,
             ._pad0_{},
             .pages = vm.big_page_allocator->GetVALimit() - vm.big_page_allocator->GetVAStart(),

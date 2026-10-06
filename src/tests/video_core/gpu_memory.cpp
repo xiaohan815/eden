@@ -512,6 +512,46 @@ TEST_CASE("Partial GPU unmap invalidates the entire final small page",
     CHECK(memory.Read(GPU_BASE + 2 * PAGE, 1).front() == 0x33);
 }
 
+TEST_CASE("Small GPU address spaces support page-table mapping and replacement",
+          "[gpu_memory][gpu_small_address_space]") {
+    const u64 big_page_bits = GENERATE(12, 16, 17);
+    Memory memory;
+    memory.device.Map(DEVICE_BASE + BIG_PAGE, CPU_BASE, BIG_PAGE, memory.asid);
+    constexpr u64 address_space_bits = 18;
+    constexpr GPUVAddr end = u64{1} << address_space_bits;
+    const u64 big_page = u64{1} << big_page_bits;
+    const GPUVAddr address = end - big_page;
+    Tegra::MemoryManager gpu{*memory.system, memory.device, address_space_bits, 0, big_page_bits};
+    gpu.BindRasterizer(&memory.rasterizer);
+    gpu.Map(address, DEVICE_BASE, big_page, Tegra::PTEKind::INVALID, true);
+    CHECK(gpu.GpuToCpuAddress(end - 1) == DEVICE_BASE + big_page - 1);
+    CHECK(gpu.Read<u8>(address) == 0x11);
+    gpu.Map(end - PAGE, DEVICE_BASE, PAGE, Tegra::PTEKind::PITCH, false);
+    CHECK(gpu.GpuToCpuAddress(end - 1) == DEVICE_BASE + PAGE - 1);
+    CHECK(gpu.Read<u8>(end - 1) == 0x11);
+    gpu.Unmap(end - PAGE, PAGE);
+    CHECK_FALSE(gpu.GpuToCpuAddress(end - 1).has_value());
+    if (big_page > PAGE) {
+        CHECK(gpu.GpuToCpuAddress(address) == DEVICE_BASE);
+    }
+}
+
+TEST_CASE("Small GPU address spaces preserve sparse page coverage at their upper bound",
+          "[gpu_memory][gpu_small_address_space]") {
+    const u64 big_page_bits = GENERATE(16, 17);
+    Memory memory;
+    constexpr GPUVAddr end = u64{1} << 18;
+    Tegra::MemoryManager gpu{*memory.system, memory.device, 18, 0, big_page_bits};
+    gpu.BindRasterizer(&memory.rasterizer);
+    gpu.MapSparse(end - (u64{1} << big_page_bits), u64{1} << big_page_bits, true);
+    gpu.Map(end - PAGE, DEVICE_BASE, PAGE, Tegra::PTEKind::INVALID, false);
+    CHECK(gpu.GpuToCpuAddress(end - 1) == DEVICE_BASE + PAGE - 1);
+    CHECK_FALSE(gpu.GpuToCpuAddress(end - PAGE - 1).has_value());
+    CHECK(gpu.Read<u8>(end - 1) == 0x11);
+    gpu.Unmap(end - PAGE, PAGE);
+    CHECK_FALSE(gpu.GpuToCpuAddress(end - 1).has_value());
+}
+
 TEST_CASE("GPU block reads observe changed physical backing", "[gpu_memory]") {
     const bool big_pages = GENERATE(true, false);
     const bool safe = GENERATE(true, false);
