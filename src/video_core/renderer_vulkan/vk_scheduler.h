@@ -138,7 +138,14 @@ public:
             auto target_time = start_time + frame_interval * frame_counter;
             if (target_time >= now) {
                 auto sleep_time = target_time - now;
-                if (sleep_time > std::chrono::milliseconds(15)) {
+#ifdef __APPLE__
+                // macOS can sleep short intervals. Limit the yield loop to the final millisecond
+                // instead of occupying a CPU core during most of the frame-pacing wait.
+                constexpr auto minimum_sleep = std::chrono::milliseconds(1);
+#else
+                constexpr auto minimum_sleep = std::chrono::milliseconds(15);
+#endif
+                if (sleep_time > minimum_sleep) {
                     std::this_thread::sleep_for(sleep_time - std::chrono::milliseconds(1));
                 }
                 while (std::chrono::steady_clock::now() < target_time) {
