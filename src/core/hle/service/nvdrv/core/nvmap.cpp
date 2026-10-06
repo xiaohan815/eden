@@ -5,7 +5,8 @@
 // SPDX-FileCopyrightText: 2022 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <functional>
+#include <limits>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -160,6 +161,29 @@ DAddr NvMap::GetHandleAddress(Handle::Id handle) {
     }
 }
 
+bool NvMap::ReclaimUnpinnedHandle(const Handle& requested, bool low_area_only) {
+    std::vector<std::shared_ptr<Handle>> candidates;
+    {
+        std::scoped_lock queue_lock(unmap_queue_lock);
+        candidates.assign(unmap_queue.begin(), unmap_queue.end());
+    }
+    for (const auto& candidate : candidates) {
+        if (candidate.get() == &requested) {
+            continue;
+        }
+        // Pin/unpin take the handle lock before the queue lock. Do not wait for a handle
+        // while holding the queue lock; another caller may be taking it out of the queue.
+        std::scoped_lock handle_lock(candidate->mutex);
+        std::scoped_lock queue_lock(unmap_queue_lock);
+        if (candidate->pins == 0 && candidate->unmap_queue_entry &&
+            (!low_area_only || candidate->pin_virt_address != 0)) {
+            UnmapHandle(*candidate);
+            return true;
+        }
+    }
+    return false;
+}
+
 DAddr NvMap::PinHandle(NvMap::Handle::Id handle, bool low_area_pin) {
     auto handle_description{GetHandle(handle)};
     if (!handle_description) [[unlikely]] {
@@ -167,74 +191,65 @@ DAddr NvMap::PinHandle(NvMap::Handle::Id handle, bool low_area_pin) {
     }
 
     std::scoped_lock lock(handle_description->mutex);
-    const auto map_low_area = [&] {
-        if (handle_description->pin_virt_address == 0) {
-            u32 address = host1x.Allocator().Allocate(u32(handle_description->aligned_size));
-            host1x.gmmu_manager.Map(GPUVAddr(address), handle_description->d_address, handle_description->aligned_size);
-            handle_description->pin_virt_address = address;
-        }
-    };
+    if (low_area_pin && handle_description->aligned_size > std::numeric_limits<u32>::max()) {
+        LOG_ERROR(Service_NVDRV, "Handle is too large for the Host1x address space");
+        return 0;
+    }
     if (!handle_description->pins) {
-        // If we're in the unmap queue we can just remove ourselves and return since we're already
-        // mapped
+        bool cached_mapping = false;
         {
-            // Lock now to prevent our queue entry from being removed for allocation in-between the
-            // following check and erase
             std::scoped_lock queueLock(unmap_queue_lock);
             if (handle_description->unmap_queue_entry) {
                 unmap_queue.erase(*handle_description->unmap_queue_entry);
                 handle_description->unmap_queue_entry.reset();
-
-                if (low_area_pin) {
-                    map_low_area();
-                    handle_description->pins++;
-                    return static_cast<DAddr>(handle_description->pin_virt_address);
-                }
-
-                handle_description->pins++;
-                return handle_description->d_address;
+                cached_mapping = true;
             }
         }
 
-        using namespace std::placeholders;
-        // If not then allocate some space and map it
-        DAddr address{};
-        auto& smmu = host1x.MemoryManager();
-        auto* session = core.GetSession(handle_description->session_id);
-        const VAddr vaddress = handle_description->address;
-        const size_t map_size = handle_description->aligned_size;
-        if (session->has_preallocated_area && session->mapper->IsInBounds(vaddress, map_size)) {
-            handle_description->d_address = session->mapper->Map(vaddress, map_size);
-            handle_description->in_heap = true;
-        } else {
-            size_t aligned_up = Common::AlignUp(map_size, BIG_PAGE_SIZE);
-            while ((address = smmu.Allocate(aligned_up)) == 0) {
-                // Free handles until the allocation succeeds
-                std::scoped_lock queueLock(unmap_queue_lock);
-                if (unmap_queue.empty()) {
-                    LOG_CRITICAL(Service_NVDRV, "Ran out of SMMU address space!");
-                    return 0;
+        if (!cached_mapping) {
+            // A cached mapping is still valid; otherwise allocate space in the SMMU.
+            DAddr address{};
+            auto& smmu = host1x.MemoryManager();
+            auto* session = core.GetSession(handle_description->session_id);
+            const VAddr vaddress = handle_description->address;
+            const size_t map_size = handle_description->aligned_size;
+            if (session->has_preallocated_area && session->mapper->IsInBounds(vaddress, map_size)) {
+                handle_description->d_address = session->mapper->Map(vaddress, map_size);
+                handle_description->in_heap = true;
+            } else {
+                size_t aligned_up = Common::AlignUp(map_size, BIG_PAGE_SIZE);
+                while ((address = smmu.Allocate(aligned_up)) == 0) {
+                    if (!ReclaimUnpinnedHandle(*handle_description, false)) {
+                        LOG_CRITICAL(Service_NVDRV, "Ran out of SMMU address space!");
+                        return 0;
+                    }
                 }
-                if (auto freeHandleDesc{unmap_queue.front()}) {
-                    // Handles in the unmap queue are guaranteed not to be pinned so don't bother
-                    // checking if they are before unmapping
-                    std::scoped_lock freeLock(freeHandleDesc->mutex);
-                    if (freeHandleDesc->d_address)
-                        UnmapHandle(*freeHandleDesc);
-                } else {
-                    LOG_CRITICAL(Service_NVDRV, "Ran out of SMMU address space!");
-                    return 0;
-                }
-            }
 
-            handle_description->d_address = address;
-            smmu.Map(address, vaddress, map_size, session->asid, true);
-            handle_description->in_heap = false;
+                handle_description->d_address = address;
+                smmu.Map(address, vaddress, map_size, session->asid, true);
+                handle_description->in_heap = false;
+            }
         }
     }
 
-    if (low_area_pin) {
-        map_low_area();
+    if (low_area_pin && handle_description->pin_virt_address == 0) {
+        u32 address{};
+        const u32 map_size = static_cast<u32>(handle_description->aligned_size);
+        while ((address = host1x.Allocator().Allocate(map_size)) == 0) {
+            if (!ReclaimUnpinnedHandle(*handle_description, true)) {
+                // No reference was added. Drop only an unpinned SMMU mapping, retaining
+                // any device mapping that an existing GPU reference still uses.
+                if (handle_description->pins == 0) {
+                    std::scoped_lock queue_lock(unmap_queue_lock);
+                    UnmapHandle(*handle_description);
+                }
+                LOG_CRITICAL(Service_NVDRV, "Ran out of Host1x address space!");
+                return 0;
+            }
+        }
+        host1x.gmmu_manager.Map(GPUVAddr(address), handle_description->d_address,
+                                handle_description->aligned_size);
+        handle_description->pin_virt_address = address;
     }
 
     handle_description->pins++;

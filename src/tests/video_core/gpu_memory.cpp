@@ -154,6 +154,30 @@ struct Memory {
     Core::Asid asid{};
 };
 
+struct NvMemory : Memory {
+    NvMemory() : host1x{*system}, core{host1x} {
+        host1x.MemoryManager().BindInterface(&rasterizer);
+        host1x.gmmu_manager.BindRasterizer(&rasterizer);
+        session = core.OpenSession(&process);
+    }
+
+    ~NvMemory() {
+        core.CloseSession(session);
+    }
+
+    auto CreateHandle(u64 size, VAddr address) {
+        std::shared_ptr<Service::Nvidia::NvCore::NvMap::Handle> handle;
+        REQUIRE(core.GetNvMapFile().CreateHandle(size, handle) ==
+                Service::Nvidia::NvResult::Success);
+        REQUIRE(handle->Alloc({}, PAGE, 0, address, session) == Service::Nvidia::NvResult::Success);
+        return handle;
+    }
+
+    Tegra::Host1x::Host1x host1x;
+    Service::Nvidia::NvCore::Container core;
+    Service::Nvidia::NvCore::SessionId session{};
+};
+
 } // namespace
 
 TEST_CASE("GPU block reads observe device holes after mapping", "[gpu_memory]") {
@@ -419,4 +443,106 @@ TEST_CASE("NvMap reports a full address space without reclaimable handles", "[gp
     nvmap.UnpinHandle(active->id);
     core.CloseSession(session);
     smmu.Free(reserved_start, reserved_size);
+}
+
+TEST_CASE("NvMap low-area failure leaves no mapping and can be retried",
+          "[gpu_memory][nvmap][nvmap_low]") {
+    const bool cached = GENERATE(false, true);
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    if (cached) {
+        REQUIRE(nvmap.PinHandle(handle->id, false) != 0);
+        nvmap.UnpinHandle(handle->id);
+        REQUIRE(handle->unmap_queue_entry.has_value());
+    }
+    auto& allocator = memory.host1x.Allocator();
+    const u32 reserved_start = allocator.GetVAStart();
+    const u32 reserved_size = allocator.GetVALimit() - reserved_start;
+    REQUIRE(allocator.Allocate(reserved_size) == reserved_start);
+    REQUIRE(nvmap.PinHandle(handle->id, true) == 0);
+    CHECK(handle->pins == 0);
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(0).has_value());
+
+    allocator.Free(reserved_start, reserved_size);
+    const DAddr address = nvmap.PinHandle(handle->id, true);
+    REQUIRE(address != 0);
+    CHECK(handle->pins == 1);
+    CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(0).has_value());
+    CHECK(memory.host1x.gmmu_manager.Read<u8>(address) == 0x11);
+    nvmap.UnpinHandle(handle->id);
+}
+
+TEST_CASE("NvMap low-area failure preserves an existing device pin",
+          "[gpu_memory][nvmap][nvmap_low]") {
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle(PAGE, CPU_BASE);
+    const DAddr device_address = nvmap.PinHandle(handle->id, false);
+    REQUIRE(device_address != 0);
+    auto& allocator = memory.host1x.Allocator();
+    const u32 reserved_start = allocator.GetVAStart();
+    const u32 reserved_size = allocator.GetVALimit() - reserved_start;
+    REQUIRE(allocator.Allocate(reserved_size) == reserved_start);
+    REQUIRE(nvmap.PinHandle(handle->id, true) == 0);
+    CHECK(handle->pins == 1);
+    CHECK(handle->d_address == device_address);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK(memory.host1x.MemoryManager().Read<u8>(device_address) == 0x11);
+    CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(0).has_value());
+    allocator.Free(reserved_start, reserved_size);
+    const DAddr address = nvmap.PinHandle(handle->id, true);
+    REQUIRE(address != 0);
+    CHECK(handle->pins == 2);
+    CHECK(memory.host1x.gmmu_manager.Read<u8>(address) == 0x11);
+    nvmap.UnpinHandle(handle->id);
+    nvmap.UnpinHandle(handle->id);
+}
+
+TEST_CASE("NvMap reclaims idle low-area mappings before reporting exhaustion",
+          "[gpu_memory][nvmap][nvmap_low]") {
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto device_only = memory.CreateHandle(PAGE, CPU_BASE + PAGE * 2);
+    const DAddr device_only_address = nvmap.PinHandle(device_only->id, false);
+    REQUIRE(device_only_address != 0);
+    nvmap.UnpinHandle(device_only->id);
+    auto idle = memory.CreateHandle(PAGE, CPU_BASE);
+    auto replacement = memory.CreateHandle(PAGE, CPU_BASE + PAGE);
+    const DAddr address = nvmap.PinHandle(idle->id, true);
+    REQUIRE(address != 0);
+    nvmap.UnpinHandle(idle->id);
+    auto& allocator = memory.host1x.Allocator();
+    const u32 reserved_start = static_cast<u32>(address) + PAGE;
+    const u32 reserved_size = allocator.GetVALimit() - reserved_start;
+    REQUIRE(allocator.Allocate(reserved_size) == reserved_start);
+
+    REQUIRE(nvmap.PinHandle(replacement->id, true) == address);
+    CHECK(idle->d_address == 0);
+    CHECK(idle->pin_virt_address == 0);
+    CHECK_FALSE(idle->unmap_queue_entry.has_value());
+    CHECK(replacement->pins == 1);
+    CHECK(memory.host1x.gmmu_manager.Read<u8>(address) == 0x22);
+    CHECK(device_only->d_address == device_only_address);
+    CHECK(device_only->pins == 0);
+    CHECK(device_only->unmap_queue_entry.has_value());
+    CHECK(memory.host1x.MemoryManager().Read<u8>(device_only_address) == 0x33);
+    nvmap.UnpinHandle(replacement->id);
+    allocator.Free(reserved_start, reserved_size);
+}
+
+TEST_CASE("NvMap low-area pin rejects sizes beyond its address width",
+          "[gpu_memory][nvmap][nvmap_low]") {
+    NvMemory memory;
+    auto& nvmap = memory.core.GetNvMapFile();
+    auto handle = memory.CreateHandle((u64{1} << 32) + PAGE, CPU_BASE);
+    REQUIRE(nvmap.PinHandle(handle->id, true) == 0);
+    CHECK(handle->pins == 0);
+    CHECK(handle->d_address == 0);
+    CHECK(handle->pin_virt_address == 0);
+    CHECK_FALSE(handle->unmap_queue_entry.has_value());
+    CHECK_FALSE(memory.host1x.gmmu_manager.GpuToCpuAddress(0).has_value());
 }

@@ -172,6 +172,9 @@ private:
 
     void AddHandle(std::shared_ptr<Handle> handle);
 
+    // Called with the requested handle locked; it must not be selected for reclamation.
+    bool ReclaimUnpinnedHandle(const Handle& requested, bool low_area_only);
+
     /**
      * @brief Unmaps and frees the SMMU memory region a handle is mapped to
      * @note Both `unmap_queue_lock` and `handle_description.mutex` MUST be locked when calling this
