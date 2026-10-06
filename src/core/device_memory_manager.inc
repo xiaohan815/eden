@@ -364,6 +364,10 @@ const T* DeviceMemoryManager<Traits>::GetPointer(DAddr address) const {
 template <typename Traits>
 template <typename T>
 void DeviceMemoryManager<Traits>::Write(DAddr address, T value) {
+    if (sizeof(T) > page_size - (address & page_mask)) [[unlikely]] {
+        WriteBlockUnsafe(address, &value, sizeof(T));
+        return;
+    }
     T* ptr = GetPointer<T>(address);
     if (!ptr) [[unlikely]] {
         return;
@@ -374,8 +378,20 @@ void DeviceMemoryManager<Traits>::Write(DAddr address, T value) {
 template <typename Traits>
 template <typename T>
 T DeviceMemoryManager<Traits>::Read(DAddr address) const {
-    const T* ptr = GetPointer<T>(address);
     T result{};
+    if (sizeof(T) > page_size - (address & page_mask)) [[unlikely]] {
+        // The read is logically const; walk current mappings without changing translation caches.
+        auto* destination = reinterpret_cast<u8*>(&result);
+        WalkDeviceMemory<page_bits>(
+            std::span<const TrackedEntry>{tracked_entries.data(), tracked_entries.size()},
+            address, sizeof(T), [](size_t, DAddr) {},
+            [&](size_t amount, PAddr physical_address) {
+                std::memcpy(destination, GetPointerFromRaw<u8>(physical_address), amount);
+            },
+            [&](size_t amount) { destination += amount; });
+        return result;
+    }
+    const T* ptr = GetPointer<T>(address);
     if (!ptr) [[unlikely]] {
         return result;
     }

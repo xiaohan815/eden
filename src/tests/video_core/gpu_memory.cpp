@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -242,4 +244,103 @@ TEST_CASE("GPU safe block access preserves cache synchronization", "[gpu_memory]
     REQUIRE(memory.rasterizer.invalidated.size() == chunks);
     REQUIRE(memory.rasterizer.invalidated.front() ==
             std::tuple{DEVICE_BASE, read_bytes, VideoCommon::CacheType::QueryCache});
+}
+
+TEST_CASE("GPU scalar reads follow both address translations across a page", "[gpu_memory]") {
+    const bool big_pages = GENERATE(true, false);
+    Memory memory{big_pages};
+    memory.RemapPage(1);
+    const auto check = [&]<typename T>() {
+        std::array<u8, sizeof(T)> bytes;
+        std::fill_n(bytes.begin(), sizeof(T) / 2, 0x11);
+        std::fill(bytes.begin() + sizeof(T) / 2, bytes.end(), 0x99);
+        T expected{};
+        std::memcpy(&expected, bytes.data(), bytes.size());
+        REQUIRE(memory.gpu.Read<T>(GPU_BASE + PAGE - sizeof(T) / 2) == expected);
+    };
+    check.operator()<u16>();
+    check.operator()<u32>();
+    check.operator()<u64>();
+}
+
+TEST_CASE("Device scalar reads follow remapped pages", "[gpu_memory]") {
+    Memory memory;
+    memory.RemapPage(1);
+    const auto check = [&]<typename T>() {
+        std::array<u8, sizeof(T)> bytes;
+        std::fill_n(bytes.begin(), sizeof(T) / 2, 0x11);
+        std::fill(bytes.begin() + sizeof(T) / 2, bytes.end(), 0x99);
+        T expected{};
+        std::memcpy(&expected, bytes.data(), bytes.size());
+        REQUIRE(memory.device.Read<T>(DEVICE_BASE + PAGE - sizeof(T) / 2) == expected);
+    };
+    check.operator()<u16>();
+    check.operator()<u32>();
+    check.operator()<u64>();
+}
+
+TEST_CASE("Scalar writes preserve old backing when a device page moves", "[gpu_memory]") {
+    const bool through_gpu = GENERATE(true, false);
+    Memory memory;
+    memory.RemapPage(1);
+    constexpr u64 value = 0x0123456789ABCDEF;
+    if (through_gpu) {
+        memory.gpu.Write<u64>(GPU_BASE + PAGE - 4, value);
+    } else {
+        memory.device.Write<u64>(DEVICE_BASE + PAGE - 4, value);
+    }
+    const u8* physical = memory.system->DeviceMemory().GetPointerFromRaw<u8>(PHYSICAL_BASE);
+    const u8* replacement = memory.system->DeviceMemory().GetPointerFromRaw<u8>(NEW_PHYSICAL);
+    std::array<u8, sizeof(value)> bytes;
+    std::memcpy(bytes.data(), &value, sizeof(value));
+    REQUIRE(std::equal(bytes.begin(), bytes.begin() + 4, physical + PAGE - 4));
+    REQUIRE(
+        std::all_of(physical + PAGE, physical + PAGE * 2, [](u8 byte) { return byte == 0x22; }));
+    REQUIRE(std::equal(bytes.begin() + 4, bytes.end(), replacement));
+}
+
+TEST_CASE("GPU scalar reads honor noncontiguous small GPU pages", "[gpu_memory]") {
+    Memory memory{false};
+    memory.gpu.Map(GPU_BASE + PAGE, DEVICE_BASE + PAGE * 2, PAGE, Tegra::PTEKind::INVALID, false);
+    REQUIRE(memory.gpu.Read<u64>(GPU_BASE + PAGE - 4) == 0x3333333311111111);
+}
+
+TEST_CASE("Scalar accesses crossing an unmapped device page preserve valid bytes", "[gpu_memory]") {
+    const bool through_gpu = GENERATE(true, false);
+    Memory memory;
+    memory.UnmapPage(1);
+    const u64 actual = through_gpu ? memory.gpu.Read<u64>(GPU_BASE + PAGE - 4)
+                                   : memory.device.Read<u64>(DEVICE_BASE + PAGE - 4);
+    REQUIRE(actual == 0x11111111);
+    constexpr u64 value = 0x0123456789ABCDEF;
+    if (through_gpu) {
+        memory.gpu.Write<u64>(GPU_BASE + PAGE - 4, value);
+    } else {
+        memory.device.Write<u64>(DEVICE_BASE + PAGE - 4, value);
+    }
+    const u8* physical = memory.system->DeviceMemory().GetPointerFromRaw<u8>(PHYSICAL_BASE);
+    REQUIRE(
+        std::all_of(physical + PAGE, physical + PAGE * 2, [](u8 byte) { return byte == 0x22; }));
+    const auto updated = through_gpu ? memory.gpu.Read<u64>(GPU_BASE + PAGE - 4)
+                                     : memory.device.Read<u64>(DEVICE_BASE + PAGE - 4);
+    REQUIRE(updated == 0x89ABCDEF);
+}
+
+TEST_CASE("GPU accesses stop at the address space boundary", "[gpu_memory]") {
+    const bool big_pages = GENERATE(true, false);
+    Memory memory{big_pages};
+    constexpr GPUVAddr end = GPUVAddr{1} << 32;
+    memory.gpu.Map(end - BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, big_pages);
+    std::vector<u8> expected(16, 0);
+    std::fill_n(expected.begin(), 4, 0x10);
+    REQUIRE(memory.Read(end - 4, expected.size()) == expected);
+    REQUIRE(memory.gpu.Read<u64>(end - 4) == 0x10101010);
+    REQUIRE(memory.Read(end, 16) == std::vector<u8>(16));
+    REQUIRE(memory.gpu.GetSpan(end - 4, 16) == nullptr);
+    REQUIRE(!memory.gpu.IsGranularRange(end - 4, 16));
+    REQUIRE(memory.Read(~GPUVAddr{0} - 3, 16) == std::vector<u8>(16));
+    constexpr u64 value = 0x0123456789ABCDEF;
+    memory.gpu.Write<u64>(end - 4, value);
+    REQUIRE(memory.gpu.Read<u64>(end - 4) == 0x89ABCDEF);
+    memory.gpu.WriteBlockUnsafe(~GPUVAddr{0} - 3, &value, sizeof(value));
 }

@@ -214,6 +214,11 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr addr, std::size_t s
 
 template <typename T>
 T MemoryManager::Read(GPUVAddr addr) const {
+    if (sizeof(T) > Core::DEVICE_PAGESIZE - (addr & Core::DEVICE_PAGEMASK)) [[unlikely]] {
+        T value{};
+        ReadBlockUnsafe(addr, &value, sizeof(T));
+        return value;
+    }
     if (auto page_pointer{GetPointer(addr)}; page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
         T value;
@@ -228,6 +233,10 @@ T MemoryManager::Read(GPUVAddr addr) const {
 
 template <typename T>
 void MemoryManager::Write(GPUVAddr addr, T data) {
+    if (sizeof(T) > Core::DEVICE_PAGESIZE - (addr & Core::DEVICE_PAGEMASK)) [[unlikely]] {
+        WriteBlockUnsafe(addr, &data, sizeof(T));
+        return;
+    }
     if (auto page_pointer{GetPointer(addr)}; page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
         std::memcpy(page_pointer, &data, sizeof(T));
@@ -299,6 +308,10 @@ inline void MemoryManager::MemoryOperation(GPUVAddr gpu_src_addr, std::size_t si
     GPUVAddr current_address = gpu_src_addr;
 
     while (remaining_size > 0) {
+        if (!IsWithinGPUAddressRange(current_address)) [[unlikely]] {
+            func_unmapped(page_index, page_offset, remaining_size);
+            return;
+        }
         const std::size_t copy_amount{
             (std::min)(static_cast<std::size_t>(used_page_size) - page_offset, remaining_size)};
         auto entry = GetEntry<is_big_pages>(current_address);
