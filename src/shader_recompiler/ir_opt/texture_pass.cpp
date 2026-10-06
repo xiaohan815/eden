@@ -18,6 +18,7 @@
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "shader_recompiler/texture_types.h"
 #include "shader_recompiler/shader_info.h"
 
 namespace Shader::Optimization {
@@ -302,6 +303,10 @@ static inline bool IsTexturePixelFormatIntegerCached(Environment& env,
     return env.IsTexturePixelFormatInteger(GetTextureHandleCached(env, cbuf));
 }
 
+SampledType ReadSampledType(Environment& env, const ConstBufferAddr& cbuf) {
+    return GetSampledType(ReadTexturePixelFormatCached(env, cbuf));
+}
+
 
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env);
 static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Environment& env) {
@@ -529,7 +534,8 @@ public:
 
     u32 Add(const TextureBufferDescriptor& desc) {
         return Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
-            return desc.cbuf_index == existing.cbuf_index &&
+            return desc.sampled_type == existing.sampled_type &&
+                   desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
                    desc.shift_left == existing.shift_left &&
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
@@ -542,7 +548,8 @@ public:
 
     u32 Add(const ImageBufferDescriptor& desc) {
         const u32 index{Add(image_buffer_descriptors, desc, [&desc](const auto& existing) {
-            return desc.format == existing.format && desc.cbuf_index == existing.cbuf_index &&
+            return desc.is_signed == existing.is_signed &&
+                   desc.format == existing.format && desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
                    desc.size_shift == existing.size_shift;
         })};
@@ -554,7 +561,8 @@ public:
 
     u32 Add(const TextureDescriptor& desc) {
         const u32 index{Add(texture_descriptors, desc, [&desc](const auto& existing) {
-            return desc.type == existing.type && desc.is_depth == existing.is_depth &&
+            return desc.sampled_type == existing.sampled_type &&
+                   desc.type == existing.type && desc.is_depth == existing.is_depth &&
                    desc.has_secondary == existing.has_secondary &&
                    desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset &&
@@ -571,7 +579,8 @@ public:
 
     u32 Add(const ImageDescriptor& desc) {
         const u32 index{Add(image_descriptors, desc, [&desc](const auto& existing) {
-            return desc.type == existing.type && desc.format == existing.format &&
+            return desc.is_signed == existing.is_signed &&
+                   desc.type == existing.type && desc.format == existing.format &&
                    desc.cbuf_index == existing.cbuf_index &&
                    desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
                    desc.size_shift == existing.size_shift;
@@ -755,13 +764,20 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             }
             const bool is_written{inst->GetOpcode() != IR::Opcode::ImageRead};
             const bool is_read{inst->GetOpcode() != IR::Opcode::ImageWrite};
-            const bool is_integer{IsTexturePixelFormatIntegerCached(env, cbuf)};
+            const bool is_integer = flags.image_format != ImageFormat::Typeless ||
+                                    IsTexturePixelFormatIntegerCached(env, cbuf);
+            const bool is_signed = flags.image_format == ImageFormat::R8_SINT ||
+                                   flags.image_format == ImageFormat::R16_SINT ||
+                                   (flags.image_format == ImageFormat::Typeless &&
+                                    host_info.needs_typed_sampled_images &&
+                                    ReadSampledType(env, cbuf) == SampledType::SignedInt);
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(ImageBufferDescriptor{
                     .format = flags.image_format,
                     .is_written = is_written,
                     .is_read = is_read,
                     .is_integer = is_integer,
+                    .is_signed = is_signed,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .count = count,
@@ -774,6 +790,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .is_written = is_written,
                     .is_read = is_read,
                     .is_integer = is_integer,
+                    .is_signed = is_signed,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
                     .count = count,
@@ -782,9 +799,13 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             }
             break;
         }
-        default:
+        default: {
+            const auto sampled_type = host_info.needs_typed_sampled_images
+                                          ? ReadSampledType(env, cbuf)
+                                          : SampledType::Float;
             if (flags.type == TextureType::Buffer) {
                 index = descriptors.Add(TextureBufferDescriptor{
+                    .sampled_type = sampled_type,
                     .has_secondary = cbuf.has_secondary,
                     .cbuf_index = cbuf.index,
                     .cbuf_offset = cbuf.offset,
@@ -798,6 +819,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             } else {
                 count = std::min(count, sampled_dynamic_cap);
                 index = descriptors.Add(TextureDescriptor{
+                    .sampled_type = sampled_type,
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
                     .is_multisample = is_multisample,
@@ -813,6 +835,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 });
             }
             break;
+        }
         }
         flags.descriptor_index.Assign(index);
         inst->SetFlags(flags);
@@ -834,6 +857,12 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 PatchTexelFetch(*texture_inst.block, *texture_inst.inst, pixel_format);
             }
         }
+    }
+    if (host_info.needs_typed_sampled_images &&
+        !TextureTypesMatch(program.info,
+                           [&](u32 bank, u32 offset) { return ReadCbufCached(env, bank, offset); },
+                           [&](u32 handle) { return env.ReadTexturePixelFormat(handle); })) {
+        throw NotImplementedException("Mixed scalar types in a dynamic image array");
     }
 }
 

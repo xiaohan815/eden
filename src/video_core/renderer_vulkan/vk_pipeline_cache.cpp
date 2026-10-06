@@ -23,6 +23,7 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -62,7 +63,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 17;
+constexpr u32 CACHE_VERSION = 23;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
 
 template <typename Container>
@@ -462,6 +463,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_descriptor_set_sampled_images = device.GetMaxDescriptorSetSampledImages(),
         .support_geometry_shader_passthrough = device.IsNvGeometryShaderPassthroughSupported(),
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
+        .needs_typed_sampled_images = device.IsMoltenVK(),
     };
 
     if (device.GetMaxVertexInputAttributes() < Maxwell::NumVertexAttributes) {
@@ -535,7 +537,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
-        if (next) {
+        if (next && next->MatchesTextureTypes(*maxwell3d, *gpu_memory)) {
             current_pipeline = next;
             return BuiltPipeline(current_pipeline);
         }
@@ -556,12 +558,14 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
-    auto& pipeline{pair->second};
-    if (!is_new) {
-        return pipeline.get();
+    auto& variants{pair->second};
+    for (const auto& pipeline : variants) {
+        if (!pipeline || pipeline->MatchesTextureTypes(*kepler_compute, *gpu_memory)) {
+            return pipeline.get();
+        }
     }
-    pipeline = CreateComputePipeline(key, shader);
-    return pipeline.get();
+    variants.push_back(CreateComputePipeline(key, shader));
+    return variants.back().get();
 }
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -603,7 +607,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
-                compute_cache.emplace(key, std::move(pipeline));
+                compute_cache[key].push_back(std::move(pipeline));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -652,7 +656,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
-                graphics_cache.emplace(key, std::move(pipeline));
+                graphics_cache[key].push_back(std::move(pipeline));
             }
             ++state.built;
             if (state.has_loaded) {
@@ -685,17 +689,28 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
-    auto& pipeline{pair->second};
-    if (is_new) {
-        pipeline = CreateGraphicsPipeline();
+    auto& variants{pair->second};
+    GraphicsPipeline* pipeline{};
+    for (const auto& variant : variants) {
+        if (!variant) {
+            return nullptr;
+        }
+        if (variant->MatchesTextureTypes(*maxwell3d, *gpu_memory)) {
+            pipeline = variant.get();
+            break;
+        }
+    }
+    if (!pipeline) {
+        variants.push_back(CreateGraphicsPipeline());
+        pipeline = variants.back().get();
     }
     if (!pipeline) {
         return nullptr;
     }
     if (current_pipeline) {
-        current_pipeline->AddTransition(pipeline.get());
+        current_pipeline->AddTransition(pipeline);
     }
-    current_pipeline = pipeline.get();
+    current_pipeline = pipeline;
     return BuiltPipeline(current_pipeline);
 }
 
@@ -768,6 +783,21 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
 
+    const size_t geometry_index = static_cast<size_t>(Maxwell::ShaderType::Geometry);
+    const bool triangle_input = key.state.topology == Maxwell::PrimitiveTopology::Triangles ||
+                                key.state.topology == Maxwell::PrimitiveTopology::TriangleStrip ||
+                                key.state.topology == Maxwell::PrimitiveTopology::TriangleFan;
+    const bool lower_geometry_layer =
+        device.IsMoltenVK() && profile.support_viewport_index_layer_non_geometry && triangle_input &&
+        !key.state.xfb_enabled &&
+        key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::TessellationInit)] == 0 &&
+        key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Tessellation)] == 0 &&
+        key.unique_hashes[geometry_index] != 0 &&
+        Shader::Optimization::LowerGeometryLayerPassthrough(programs[1], programs[geometry_index]);
+    if (lower_geometry_layer) {
+        LOG_INFO(Render_Vulkan, "Lowered layer passthrough geometry to vertex output: 0x{:016x}", hash);
+    }
+
     const Shader::IR::Program* previous_stage{};
     Shader::Backend::Bindings binding;
     for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0; index < Maxwell::MaxShaderProgram;
@@ -775,6 +805,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const bool is_emulated_stage = layer_source_program != nullptr &&
                                        index == static_cast<u32>(Maxwell::ShaderType::Geometry);
         if (key.unique_hashes[index] == 0 && !is_emulated_stage) {
+            continue;
+        }
+        if (lower_geometry_layer && index == geometry_index) {
             continue;
         }
         UNIMPLEMENTED_IF(index == 0);

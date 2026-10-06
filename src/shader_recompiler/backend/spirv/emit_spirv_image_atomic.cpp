@@ -31,9 +31,18 @@ Id ImageAtomicU32(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
     }
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const Id image{Image(ctx, info)};
-    const Id pointer{ctx.OpImageTexelPointer(ctx.image_u32, image, coords, ctx.Const(0U))};
+    const bool is_signed = info.type == TextureType::Buffer
+                               ? ctx.image_buffers.at(info.descriptor_index).is_signed
+                               : ctx.images.at(info.descriptor_index).is_signed;
+    const Id scalar_type = is_signed ? ctx.S32[1] : ctx.U32[1];
+    const Id pointer_type = ctx.TypePointer(spv::StorageClass::Image, scalar_type);
+    const Id pointer{ctx.OpImageTexelPointer(pointer_type, image, coords, ctx.Const(0U))};
+    if (is_signed) {
+        value = ctx.OpBitcast(scalar_type, value);
+    }
     const auto [scope, semantics]{AtomicArgs(ctx)};
-    return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
+    const Id result = (ctx.*atomic_func)(scalar_type, pointer, scope, semantics, value);
+    return is_signed ? ctx.OpBitcast(ctx.U32[1], result) : result;
 }
 } // Anonymous namespace
 

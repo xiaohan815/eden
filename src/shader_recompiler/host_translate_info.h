@@ -27,6 +27,7 @@ struct HostTranslateInfo {
                                                 ///< passthrough shaders
     bool support_conditional_barrier{}; ///< True when the device supports barriers in conditional
                                         ///< control flow
+    bool needs_typed_sampled_images{}; ///< Match integer texture declarations to the guest format.
 };
 
 } // namespace Shader

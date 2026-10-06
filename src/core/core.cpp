@@ -400,6 +400,11 @@ struct System::Impl {
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
         kernel.SuspendEmulation(true);
+        if (gpu_core != nullptr) {
+            // Query/fence callbacks refer to service-owned state and guest allocations.
+            // Complete them before closing those services or tearing down the CPU cores.
+            gpu_core->FinishShutdown();
+        }
         kernel.CloseServices();
         kernel.ShutdownCores();
         services.reset();

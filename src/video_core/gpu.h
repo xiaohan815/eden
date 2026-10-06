@@ -228,6 +228,9 @@ public:
     /// Performs any additional necessary steps to shutdown GPU emulation.
     void NotifyShutdown();
 
+    /// Drain GPU callbacks after guest CPUs stop, while services and guest memory are alive.
+    void FinishShutdown();
+
     /// Obtain the CPU Context
     void ObtainContext();
 

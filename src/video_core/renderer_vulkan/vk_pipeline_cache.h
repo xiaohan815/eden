@@ -157,8 +157,11 @@ private:
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
 
-    ankerl::unordered_dense::map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
-    ankerl::unordered_dense::map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
+    // Retain variants so queued GPU work can continue using the previous scalar types.
+    ankerl::unordered_dense::map<ComputePipelineCacheKey,
+                                std::vector<std::unique_ptr<ComputePipeline>>> compute_cache;
+    ankerl::unordered_dense::map<GraphicsPipelineCacheKey,
+                                std::vector<std::unique_ptr<GraphicsPipeline>>> graphics_cache;
 
     ShaderPools main_pools;
 

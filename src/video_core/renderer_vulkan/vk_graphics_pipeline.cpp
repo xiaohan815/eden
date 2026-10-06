@@ -28,6 +28,8 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
+#include "shader_recompiler/texture_types.h"
+#include "video_core/shader_environment.h"
 
 #if defined(_MSC_VER) && defined(NDEBUG)
 #define LAMBDA_FORCEINLINE [[msvc::forceinline]]
@@ -36,6 +38,25 @@
 #endif
 
 namespace Vulkan {
+bool GraphicsPipeline::MatchesTextureTypes(Tegra::Engines::Maxwell3D& engine,
+                                           Tegra::MemoryManager& memory) const {
+    if (!device.IsMoltenVK()) {
+        return true;
+    }
+    for (size_t stage = 0; stage < stage_infos.size(); ++stage) {
+        const auto read_cbuf = [&](u32 bank, u32 offset) {
+            const auto& cbuf = engine.state.shader_stages[stage].const_buffers[bank];
+            return cbuf.enabled && offset < cbuf.size ? memory.Read<u32>(cbuf.address + offset) : 0u;
+        };
+        if (!Shader::TextureTypesMatch(stage_infos[stage], read_cbuf, [&](u32 handle) {
+                return VideoCommon::ReadGraphicsTexturePixelFormat(engine, memory, handle);
+            })) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;

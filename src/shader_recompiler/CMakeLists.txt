@@ -79,6 +79,7 @@ add_library(shader_recompiler STATIC
     backend/spirv/spirv_emit_context.cpp
     backend/spirv/spirv_emit_context.h
     environment.h
+    texture_types.h
     exception.h
     frontend/ir/abstract_syntax_list.h
     frontend/ir/attribute.h
@@ -222,6 +223,7 @@ add_library(shader_recompiler STATIC
     ir_opt/dead_code_elimination_pass.cpp
     ir_opt/dual_vertex_pass.cpp
     ir_opt/global_memory_to_storage_buffer_pass.cpp
+    ir_opt/geometry_layer_passthrough.cpp
     ir_opt/identity_removal_pass.cpp
     ir_opt/layer_pass.cpp
     ir_opt/lower_fp16_to_fp32.cpp

@@ -70,6 +70,33 @@ static Shader::TexturePixelFormat ConvertTexturePixelFormat(const Tegra::Texture
                                    entry.a_type, entry.srgb_conversion));
 }
 
+static Shader::TexturePixelFormat ReadTexturePixelFormat(Tegra::MemoryManager& gpu_memory,
+                                                        GPUVAddr table, u32 limit,
+                                                        bool via_header_index, u32 raw) {
+    const auto handle = Tegra::Texture::TexturePair(raw, via_header_index);
+    ASSERT(handle.first <= limit);
+    Tegra::Texture::TICEntry entry;
+    gpu_memory.ReadBlock(table + handle.first * sizeof(entry), &entry, sizeof(entry));
+    return ConvertTexturePixelFormat(entry);
+}
+
+Shader::TexturePixelFormat ReadGraphicsTexturePixelFormat(Tegra::Engines::Maxwell3D& maxwell3d,
+                                                         Tegra::MemoryManager& gpu_memory,
+                                                         u32 handle) {
+    const auto& regs = maxwell3d.regs;
+    return ReadTexturePixelFormat(gpu_memory, regs.tex_header.Address(), regs.tex_header.limit,
+                                 regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding,
+                                 handle);
+}
+
+Shader::TexturePixelFormat ReadComputeTexturePixelFormat(Tegra::Engines::KeplerCompute& compute,
+                                                        Tegra::MemoryManager& gpu_memory,
+                                                        u32 handle) {
+    const auto& regs = compute.regs;
+    return ReadTexturePixelFormat(gpu_memory, regs.tic.Address(), regs.tic.limit,
+                                 compute.launch_description.linked_tsc != 0, handle);
+}
+
 static std::string_view StageToPrefix(Shader::Stage stage) {
     switch (stage) {
     case Shader::Stage::VertexB:

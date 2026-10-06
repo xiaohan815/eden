@@ -176,7 +176,14 @@ struct StorageBufferDescriptor {
     auto operator<=>(const StorageBufferDescriptor&) const = default;
 };
 
+enum class SampledType : u8 {
+    Float,
+    SignedInt,
+    UnsignedInt,
+};
+
 struct TextureBufferDescriptor {
+    SampledType sampled_type{SampledType::Float};
     bool has_secondary;
     u32 cbuf_index;
     u32 cbuf_offset;
@@ -196,6 +203,7 @@ struct ImageBufferDescriptor {
     bool is_written;
     bool is_read;
     bool is_integer;
+    bool is_signed{};
     u32 cbuf_index;
     u32 cbuf_offset;
     u32 count;
@@ -206,6 +214,7 @@ struct ImageBufferDescriptor {
 using ImageBufferDescriptors = boost::container::small_vector<ImageBufferDescriptor, 2>;
 
 struct TextureDescriptor {
+    SampledType sampled_type{SampledType::Float};
     TextureType type;
     bool is_depth;
     bool is_multisample;
@@ -229,6 +238,7 @@ struct ImageDescriptor {
     bool is_written;
     bool is_read;
     bool is_integer;
+    bool is_signed{};
     u32 cbuf_index;
     u32 cbuf_offset;
     u32 count;

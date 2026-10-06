@@ -75,9 +75,12 @@ struct FlushAndInvalidateRegionCommand final {
 /// Command to make the gpu look into pending requests
 struct GPUTickCommand final {};
 
+/// Complete queued GPU work and its guest-memory callbacks before service teardown.
+struct FinishCommand final {};
+
 using CommandData =
     std::variant<std::monostate, SubmitListCommand, FlushRegionCommand, InvalidateRegionCommand,
-                 FlushAndInvalidateRegionCommand, GPUTickCommand>;
+                 FlushAndInvalidateRegionCommand, GPUTickCommand, FinishCommand>;
 
 struct CommandDataContainer {
     CommandDataContainer() = default;
@@ -108,6 +111,8 @@ public:
 
     /// Stops GPU command processing before its renderer and channel state are destroyed.
     void Stop();
+
+    void Finish();
 
     /// Creates and starts the GPU thread.
     void StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context,

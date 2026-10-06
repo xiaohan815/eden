@@ -48,6 +48,9 @@ public:
     void Configure(Tegra::Engines::KeplerCompute& kepler_compute, Tegra::MemoryManager& gpu_memory,
                    Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache);
 
+    bool MatchesTextureTypes(Tegra::Engines::KeplerCompute& engine,
+                             Tegra::MemoryManager& memory) const;
+
 private:
     const Device& device;
     vk::PipelineCache& pipeline_cache;

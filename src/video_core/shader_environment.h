@@ -29,6 +29,13 @@ class Memorymanager;
 
 namespace VideoCommon {
 
+Shader::TexturePixelFormat ReadGraphicsTexturePixelFormat(Tegra::Engines::Maxwell3D& maxwell3d,
+                                                         Tegra::MemoryManager& gpu_memory,
+                                                         u32 handle);
+Shader::TexturePixelFormat ReadComputeTexturePixelFormat(Tegra::Engines::KeplerCompute& compute,
+                                                        Tegra::MemoryManager& gpu_memory,
+                                                        u32 handle);
+
 class GenericEnvironment : public Shader::Environment {
 public:
     explicit GenericEnvironment() = default;

@@ -237,10 +237,10 @@ Id TextureImage(EmitContext& ctx, IR::TextureInstInfo info, const IR::Value& ind
         const TextureBufferDefinition& def{ctx.texture_buffers.at(info.descriptor_index)};
         if (def.count > 1) {
             const Id idx{index.IsImmediate() ? ctx.Const(index.U32()) : ctx.Def(index)};
-            const Id ptr{ctx.OpAccessChain(ctx.image_buffer_type, def.id, idx)};
-            return ctx.OpLoad(ctx.image_buffer_type, ptr);
+            const Id ptr{ctx.OpAccessChain(def.pointer_type, def.id, idx)};
+            return ctx.OpLoad(def.image_type, ptr);
         }
-        return ctx.OpLoad(ctx.image_buffer_type, def.id);
+        return ctx.OpLoad(def.image_type, def.id);
     } else {
         const TextureDefinition& def{ctx.textures.at(info.descriptor_index)};
         if (def.count > 1) {
@@ -257,23 +257,27 @@ Id TextureImage(EmitContext& ctx, IR::TextureInstInfo info, const IR::Value& ind
     }
 }
 
-std::pair<Id, bool> Image(EmitContext& ctx, const IR::Value& index, IR::TextureInstInfo info) {
+std::pair<Id, SampledType> Image(EmitContext& ctx, const IR::Value& index, IR::TextureInstInfo info) {
     if (info.type == TextureType::Buffer) {
         const ImageBufferDefinition def{ctx.image_buffers.at(info.descriptor_index)};
+        const auto component_type = def.is_signed ? SampledType::SignedInt
+                                    : def.is_integer ? SampledType::UnsignedInt : SampledType::Float;
         if (def.count > 1) {
             const Id idx{index.IsImmediate() ? ctx.Const(index.U32()) : ctx.Def(index)};
             const Id ptr{ctx.OpAccessChain(def.pointer_type, def.id, idx)};
-            return {ctx.OpLoad(def.image_type, ptr), def.is_integer};
+            return {ctx.OpLoad(def.image_type, ptr), component_type};
         }
-        return {ctx.OpLoad(def.image_type, def.id), def.is_integer};
+        return {ctx.OpLoad(def.image_type, def.id), component_type};
     } else {
         const ImageDefinition def{ctx.images.at(info.descriptor_index)};
+        const auto component_type = def.is_signed ? SampledType::SignedInt
+                                    : def.is_integer ? SampledType::UnsignedInt : SampledType::Float;
         if (def.count > 1) {
             const Id idx{index.IsImmediate() ? ctx.Const(index.U32()) : ctx.Def(index)};
             const Id ptr{ctx.OpAccessChain(def.pointer_type, def.id, idx)};
-            return {ctx.OpLoad(def.image_type, ptr), def.is_integer};
+            return {ctx.OpLoad(def.image_type, ptr), component_type};
         }
-        return {ctx.OpLoad(def.image_type, def.id), def.is_integer};
+        return {ctx.OpLoad(def.image_type, def.id), component_type};
     }
 }
 
@@ -306,6 +310,22 @@ Id Emit(MethodPtrType sparse_ptr, MethodPtrType non_sparse_ptr, EmitContext& ctx
     sparse->Invalidate();
     Decorate(ctx, inst, sample);
     return ctx.OpCompositeExtract(result_type, sample, 1U);
+}
+
+template <typename MethodPtrType, typename... Args>
+Id EmitSampled(MethodPtrType sparse_ptr, MethodPtrType non_sparse_ptr, EmitContext& ctx,
+               IR::Inst* inst, Args&&... args) {
+    const auto info = inst->Flags<IR::TextureInstInfo>();
+    const auto component_type = info.type == TextureType::Buffer
+                                    ? ctx.texture_buffers.at(info.descriptor_index).component_type
+                                    : ctx.textures.at(info.descriptor_index).component_type;
+    const Id result_type = component_type == SampledType::SignedInt     ? ctx.S32[4]
+                           : component_type == SampledType::UnsignedInt ? ctx.U32[4]
+                                                                      : ctx.F32[4];
+    const Id result = Emit(sparse_ptr, non_sparse_ptr, ctx, inst, result_type,
+                           std::forward<Args>(args)...);
+    // The IR carries texture results in F32 registers even for integer guest formats.
+    return component_type == SampledType::Float ? result : ctx.OpBitcast(ctx.F32[4], result);
 }
 
 Id IsScaled(EmitContext& ctx, const IR::Value& index, Id member_index, u32 base_index) {
@@ -507,8 +527,8 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value&
     if (ctx.stage == Stage::Fragment) {
         const ImageOperands operands(ctx, info.has_bias != 0, false, info.has_lod_clamp != 0,
                                      bias_lc, offset);
-        return Emit(&EmitContext::OpImageSparseSampleImplicitLod,
-                    &EmitContext::OpImageSampleImplicitLod, ctx, inst, ctx.F32[4],
+        return EmitSampled(&EmitContext::OpImageSparseSampleImplicitLod,
+                    &EmitContext::OpImageSampleImplicitLod, ctx, inst,
                     Texture(ctx, info, index), coords, operands.MaskOptional(), operands.Span());
     } else {
         // We can't use implicit lods on non-fragment stages on SPIR-V. Maxwell hardware behaves as
@@ -516,8 +536,8 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value&
         // derivatives
         const Id lod{ctx.Const(0.0f)};
         const ImageOperands operands(ctx, false, true, info.has_lod_clamp != 0, lod, offset);
-        return Emit(&EmitContext::OpImageSparseSampleExplicitLod,
-                    &EmitContext::OpImageSampleExplicitLod, ctx, inst, ctx.F32[4],
+        return EmitSampled(&EmitContext::OpImageSparseSampleExplicitLod,
+                    &EmitContext::OpImageSampleExplicitLod, ctx, inst,
                     Texture(ctx, info, index), coords, operands.Mask(), operands.Span());
     }
 }
@@ -527,8 +547,8 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, const IR::Value&
     const auto info{inst->Flags<IR::TextureInstInfo>()};
     const ImageOperands operands(ctx, false, true, false, lod, offset);
 
-    Id result = Emit(&EmitContext::OpImageSparseSampleExplicitLod,
-                     &EmitContext::OpImageSampleExplicitLod, ctx, inst, ctx.F32[4],
+    Id result = EmitSampled(&EmitContext::OpImageSparseSampleExplicitLod,
+                     &EmitContext::OpImageSampleExplicitLod, ctx, inst,
                      Texture(ctx, info, index), coords, operands.Mask(), operands.Span());
 #ifdef ANDROID
     if (Settings::values.fix_bloom_effects.GetValue()) {
@@ -575,8 +595,8 @@ Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id 
     if (ctx.profile.need_gather_subpixel_offset) {
         coords = ImageGatherSubpixelOffset(ctx, info, TextureImage(ctx, info, index), coords);
     }
-    return Emit(&EmitContext::OpImageSparseGather, &EmitContext::OpImageGather, ctx, inst,
-                ctx.F32[4], Texture(ctx, info, index), coords, ctx.Const(info.gather_component),
+    return EmitSampled(&EmitContext::OpImageSparseGather, &EmitContext::OpImageGather, ctx, inst,
+                Texture(ctx, info, index), coords, ctx.Const(info.gather_component),
                 operands.MaskOptional(), operands.Span());
 }
 
@@ -604,7 +624,7 @@ Id EmitImageFetch(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
         lod = Id{};
     }
     const ImageOperands operands(lod, ms);
-    return Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst, ctx.F32[4],
+    return EmitSampled(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst,
                 TextureImage(ctx, info, index), coords, operands.MaskOptional(), operands.Span());
 }
 
@@ -655,8 +675,8 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, I
                                               ctx.Def(offset), {}, lod_clamp)
                               : ImageOperands(ctx, info.has_lod_clamp != 0, derivatives,
                                               info.num_derivatives, offset, lod_clamp);
-    return Emit(&EmitContext::OpImageSparseSampleExplicitLod,
-                &EmitContext::OpImageSampleExplicitLod, ctx, inst, ctx.F32[4],
+    return EmitSampled(&EmitContext::OpImageSparseSampleExplicitLod,
+                &EmitContext::OpImageSampleExplicitLod, ctx, inst,
                 Texture(ctx, info, index), coords, operands.Mask(), operands.Span());
 }
 
@@ -666,11 +686,12 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id co
         LOG_WARNING(Shader_SPIRV, "Typeless image read not supported by host");
         return ctx.ConstantNull(ctx.U32[4]);
     }
-    const auto [image, is_integer] = Image(ctx, index, info);
-    const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
+    const auto [image, component_type] = Image(ctx, index, info);
+    const Id result_type{component_type == SampledType::SignedInt ? ctx.S32[4]
+                         : component_type == SampledType::UnsignedInt ? ctx.U32[4] : ctx.F32[4]};
     Id color{Emit(&EmitContext::OpImageSparseRead, &EmitContext::OpImageRead, ctx, inst,
                   result_type, image, coords, std::nullopt, std::span<const Id>{})};
-    if (!is_integer) {
+    if (component_type != SampledType::UnsignedInt) {
         color = ctx.OpBitcast(ctx.U32[4], color);
     }
     return color;
@@ -678,9 +699,9 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id co
 
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords, Id color) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
-    const auto [image, is_integer] = Image(ctx, index, info);
-    if (!is_integer) {
-        color = ctx.OpBitcast(ctx.F32[4], color);
+    const auto [image, component_type] = Image(ctx, index, info);
+    if (component_type != SampledType::UnsignedInt) {
+        color = ctx.OpBitcast(component_type == SampledType::SignedInt ? ctx.S32[4] : ctx.F32[4], color);
     }
     ctx.OpImageWrite(image, coords, color);
 }

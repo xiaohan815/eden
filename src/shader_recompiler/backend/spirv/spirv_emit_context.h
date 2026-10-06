@@ -41,11 +41,15 @@ struct TextureDefinition {
     Id image_type;
     u32 count;
     bool is_multisample;
+    SampledType component_type;
 };
 
 struct TextureBufferDefinition {
     Id id;
+    Id image_type;
+    Id pointer_type;
     u32 count;
+    SampledType component_type;
 };
 
 struct ImageBufferDefinition {
@@ -54,6 +58,7 @@ struct ImageBufferDefinition {
     Id pointer_type;
     u32 count;
     bool is_integer;
+    bool is_signed;
 };
 
 struct ImageDefinition {
@@ -62,6 +67,7 @@ struct ImageDefinition {
     Id pointer_type;
     u32 count;
     bool is_integer;
+    bool is_signed;
 };
 
 struct UniformDefinitions {
@@ -250,7 +256,6 @@ public:
     Id output_f32{};
     Id output_u32{};
 
-    Id image_buffer_type{};
     Id image_u32{};
 
     std::array<UniformDefinitions, Info::MAX_CBUFS> cbufs{};

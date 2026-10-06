@@ -128,6 +128,9 @@ public:
         gpu_memory = gpu_memory_;
     }
 
+    bool MatchesTextureTypes(Tegra::Engines::Maxwell3D& engine,
+                             Tegra::MemoryManager& memory) const;
+
 private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);

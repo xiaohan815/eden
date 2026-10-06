@@ -19,7 +19,9 @@ add_executable(tests
     core/core_timing.cpp
     core/internal_network/network.cpp
     video_core/memory_budget.cpp
+    video_core/geometry_layer_passthrough.cpp
     video_core/memory_tracker.cpp
+    video_core/texture_types.cpp
     input_common/calibration_configuration_job.cpp
 )
 

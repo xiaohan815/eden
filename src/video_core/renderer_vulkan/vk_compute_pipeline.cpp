@@ -23,12 +23,31 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
+#include "shader_recompiler/texture_types.h"
+#include "video_core/shader_environment.h"
 
 namespace Vulkan {
 
 using Shader::ImageBufferDescriptor;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
 using Tegra::Texture::TexturePair;
+
+bool ComputePipeline::MatchesTextureTypes(Tegra::Engines::KeplerCompute& engine,
+                                          Tegra::MemoryManager& memory) const {
+    if (!device.IsMoltenVK()) {
+        return true;
+    }
+    const auto& qmd = engine.launch_description;
+    const auto read_cbuf = [&](u32 bank, u32 offset) {
+        const auto& cbuf = qmd.const_buffer_config[bank];
+        return ((qmd.const_buffer_enable_mask.Value() >> bank) & 1) != 0 && offset < cbuf.size
+                   ? memory.Read<u32>(cbuf.Address() + offset)
+                   : 0u;
+    };
+    return Shader::TextureTypesMatch(info, read_cbuf, [&](u32 handle) {
+        return VideoCommon::ReadComputeTexturePixelFormat(engine, memory, handle);
+    });
+}
 
 ComputePipeline::ComputePipeline(const Device& device_, vk::PipelineCache& pipeline_cache_,
                                  DescriptorPool& descriptor_pool,

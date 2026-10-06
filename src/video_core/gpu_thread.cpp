@@ -51,6 +51,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 scheduler.Push(submit_list->channel, std::move(submit_list->entries));
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 system.GPU().TickWork();
+            } else if (std::holds_alternative<FinishCommand>(next.data)) {
+                renderer.ReadRasterizer()->ReleaseFences(true);
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                 renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
             } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
@@ -71,6 +73,13 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
 
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries) {
     PushCommand(SubmitListCommand(channel, std::move(entries)));
+}
+
+void ThreadManager::Finish() {
+    if (thread.joinable()) {
+        PushCommand(FinishCommand{}, true);
+        Stop();
+    }
 }
 
 void ThreadManager::FlushRegion(DAddr addr, u64 size) {

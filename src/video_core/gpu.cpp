@@ -529,6 +529,10 @@ void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
 }
 
+void GPU::FinishShutdown() {
+    impl->gpu_thread.Finish();
+}
+
 void GPU::ObtainContext() {
     impl->ObtainContext();
 }
