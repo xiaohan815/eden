@@ -158,6 +158,7 @@ private:
     NvResult GetVARegions3(IoctlGetVaRegions& params, std::span<VaRegion> regions);
 
     [[nodiscard]] bool FreeMappingLocked(u64 offset) noexcept;
+    void ReleaseRemapPinsLocked(u64 offset, u64 size);
 
     Module& module;
 
@@ -194,6 +195,13 @@ private:
     //!< Holds allocations created by AllocSpace from
     //!< which fixed buffers can be mapped into
     std::map<u64, Allocation> allocation_map;
+    struct RemappedRange {
+        u64 size;
+        // Fragments of one remap share a single pin. Explicit GPU unmapping
+        // releases it; closing the guest session revokes remaining mappings.
+        std::shared_ptr<NvCore::NvMap::Handle::Id> pin;
+    };
+    std::map<u64, RemappedRange> remapped_ranges;
     std::mutex mutex; //!< Locks all AS operations
 
     struct VM {

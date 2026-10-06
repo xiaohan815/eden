@@ -5,6 +5,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <random>
 #include <tuple>
 #include <vector>
 
@@ -191,6 +192,118 @@ TEST_CASE("GPU block reads observe device holes after mapping", "[gpu_memory]") 
     std::fill_n(expected.begin() + PAGE * 2, PAGE, 0x33);
     REQUIRE(memory.Read(GPU_BASE, expected.size(), safe) == expected);
     REQUIRE(memory.Read(GPU_BASE + PAGE + 123, 257, safe) == std::vector<u8>(257));
+}
+
+TEST_CASE("Small GPU page replacements preserve surrounding big-page mappings",
+          "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory;
+    memory.device.Map(DEVICE_BASE + BIG_PAGE, CPU_BASE + PAGE, PAGE, memory.asid);
+    memory.gpu.Map(GPU_BASE + 3 * PAGE, DEVICE_BASE + BIG_PAGE, PAGE, Tegra::PTEKind::INVALID,
+                   false);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE) == DEVICE_BASE + BIG_PAGE);
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0x22);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + 4 * PAGE, 1).front() == 0x55);
+}
+
+TEST_CASE("Unmapping a small GPU page preserves the remainder of its big page",
+          "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory;
+    memory.gpu.Unmap(GPU_BASE + 3 * PAGE, PAGE);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + 4 * PAGE, 1).front() == 0x55);
+}
+
+TEST_CASE("GPU unmapping across two big-page edges preserves both outside regions",
+          "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    memory.gpu.Unmap(GPU_BASE + BIG_PAGE - PAGE, 2 * PAGE);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE - PAGE, 1).front() == 0);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE, 1).front() == 0);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE + PAGE, 1).front() == 0x22);
+}
+
+TEST_CASE("Small sparse GPU regions override mapped big pages", "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory;
+    memory.gpu.MapSparse(GPU_BASE + 3 * PAGE, PAGE, false);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + 4 * PAGE, 1).front() == 0x55);
+}
+
+TEST_CASE("Big sparse GPU regions hide stale small-page translations",
+          "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory{false};
+    memory.gpu.MapSparse(GPU_BASE, BIG_PAGE, true);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE + PAGE, 1).front() == 0);
+    memory.gpu.Map(GPU_BASE + 3 * PAGE, DEVICE_BASE + PAGE, PAGE, Tegra::PTEKind::INVALID, false);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE) == DEVICE_BASE + PAGE);
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0x22);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE + PAGE, 1).front() == 0);
+}
+
+TEST_CASE("Mixed GPU page operations match an independent page address model",
+          "[gpu_memory][gpu_mixed_pages]") {
+    Memory memory;
+    constexpr size_t pages = 2 * BIG_PAGE / PAGE;
+    std::array<DAddr, pages> expected{};
+    memory.gpu.Map(GPU_BASE + BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    for (size_t i = 0; i < pages; ++i) {
+        expected[i] = DEVICE_BASE + (i % (BIG_PAGE / PAGE)) * PAGE;
+    }
+    std::mt19937 random{0xEDE032};
+    for (size_t step = 0; step < 150; ++step) {
+        const size_t operation = random() % 5;
+        size_t first = random() % pages;
+        size_t count = 1 + random() % (pages - first);
+        const bool big = operation >= 3;
+        if (big) {
+            first = (first / (BIG_PAGE / PAGE)) * (BIG_PAGE / PAGE);
+            count = BIG_PAGE / PAGE;
+        }
+        const GPUVAddr address = GPU_BASE + first * PAGE;
+        const size_t size = count * PAGE;
+        if (operation == 0 || operation == 3) {
+            // Small mappings use contiguous backing within one device big page.
+            if (!big) {
+                count = std::min(count, BIG_PAGE / PAGE);
+            }
+            const size_t source = big ? 0 : random() % (BIG_PAGE / PAGE - count + 1);
+            memory.gpu.Map(address, DEVICE_BASE + source * PAGE, count * PAGE,
+                           Tegra::PTEKind::INVALID, big);
+            for (size_t i = 0; i < count; ++i) {
+                expected[first + i] = DEVICE_BASE + (source + i) * PAGE;
+            }
+        } else {
+            if (operation == 1) {
+                memory.gpu.Unmap(address, size);
+            } else {
+                memory.gpu.MapSparse(address, size, big);
+            }
+            std::fill_n(expected.begin() + first, count, DAddr{});
+        }
+        INFO("step=" << step << " operation=" << operation << " first=" << first
+                     << " count=" << count);
+        for (size_t i = 0; i < pages; ++i) {
+            const GPUVAddr current = GPU_BASE + i * PAGE;
+            const auto actual = memory.gpu.GpuToCpuAddress(current);
+            if (expected[i]) {
+                CHECK(actual == expected[i]);
+                const auto value = static_cast<u8>(((expected[i] - DEVICE_BASE) / PAGE + 1) * 0x11);
+                CHECK(memory.Read(current, 1).front() == value);
+            } else {
+                CHECK_FALSE(actual.has_value());
+                CHECK(memory.Read(current, 1).front() == 0);
+            }
+        }
+    }
 }
 
 TEST_CASE("GPU block reads observe changed physical backing", "[gpu_memory]") {

@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -212,13 +213,13 @@ bool nvhost_as_gpu::FreeMappingLocked(u64 offset) noexcept {
             allocator.Free(u32(mapping.offset >> page_size_bits),
                            u32(aligned_size >> page_size_bits));
         }
-        // Sparse mappings shouldn't be fully unmapped, just returned to their sparse state
-        // Only FreeSpace can unmap them fully
+        // Invalidate the old mapping before releasing its pins, then restore
+        // the reserved sparse state. Only FreeSpace releases the reservation.
+        gmmu->Unmap(offset, mapping.size);
         if (mapping.sparse_alloc) {
             gmmu->MapSparse(offset, mapping.size, mapping.big_page);
-        } else {
-            gmmu->Unmap(offset, mapping.size);
         }
+        ReleaseRemapPinsLocked(offset, mapping.size);
         nvmap.UnpinHandle(mapping.handle);
         if (mapping.fixed) {
             auto allocation = allocation_map.upper_bound(offset);
@@ -232,6 +233,35 @@ bool nvhost_as_gpu::FreeMappingLocked(u64 offset) noexcept {
         return true;
     }
     return false;
+}
+
+void nvhost_as_gpu::ReleaseRemapPinsLocked(u64 offset, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    const u64 end = offset + size;
+    auto it = remapped_ranges.upper_bound(offset);
+    if (it != remapped_ranges.begin()) {
+        const auto previous = std::prev(it);
+        if (previous->second.size > offset - previous->first) {
+            it = previous;
+        }
+    }
+    while (it != remapped_ranges.end() && it->first < end) {
+        auto node = remapped_ranges.extract(it++);
+        const u64 start = node.key();
+        const u64 range_end = start + node.mapped().size;
+        auto pin = std::move(node.mapped().pin);
+        if (start < offset) {
+            remapped_ranges.emplace(start, RemappedRange{offset - start, pin});
+        }
+        if (range_end > end) {
+            remapped_ranges.emplace(end, RemappedRange{range_end - end, pin});
+        }
+        if (pin.use_count() == 1) {
+            nvmap.UnpinHandle(*pin);
+        }
+    }
 }
 
 NvResult nvhost_as_gpu::FreeSpace(IoctlFreeSpace& params) {
@@ -253,6 +283,7 @@ NvResult nvhost_as_gpu::FreeSpace(IoctlFreeSpace& params) {
         // Unset sparse flag if required
         if (allocation.sparse)
             gmmu->Unmap(params.offset, allocation.size);
+        ReleaseRemapPinsLocked(params.offset, allocation.size);
 
         auto& allocator{params.page_size == VM::YUZU_PAGESIZE ? *vm.small_page_allocator : *vm.big_page_allocator};
         u32 page_size_bits{params.page_size == VM::YUZU_PAGESIZE ? VM::PAGE_SIZE_BITS : vm.big_page_size_bits};
@@ -267,6 +298,7 @@ NvResult nvhost_as_gpu::FreeSpace(IoctlFreeSpace& params) {
 NvResult nvhost_as_gpu::Remap(std::span<IoctlRemapEntry> entries) {
     LOG_DEBUG(Service_NVDRV, "called, num_entries={:#X}", entries.size());
 
+    std::scoped_lock lock(mutex);
     if (!vm.initialised) {
         return NvResult::BadValue;
     }
@@ -278,9 +310,14 @@ NvResult nvhost_as_gpu::Remap(std::span<IoctlRemapEntry> entries) {
 
         auto alloc{allocation_map.upper_bound(virtual_address)};
 
-        if (alloc-- == allocation_map.begin() ||
-            (virtual_address - alloc->first) + size > alloc->second.size) {
+        if (size == 0 || alloc == allocation_map.begin()) {
             LOG_WARNING(Service_NVDRV, "Cannot remap into an unallocated region!");
+            return NvResult::BadValue;
+        }
+        --alloc;
+        const u64 relative_offset = virtual_address - alloc->first;
+        if (relative_offset > alloc->second.size || size > alloc->second.size - relative_offset) {
+            LOG_WARNING(Service_NVDRV, "Cannot remap beyond the reserved GPU region");
             return NvResult::BadValue;
         }
 
@@ -291,22 +328,34 @@ NvResult nvhost_as_gpu::Remap(std::span<IoctlRemapEntry> entries) {
 
         const bool use_big_pages = alloc->second.big_pages;
         if (!entry.handle) {
+            gmmu->Unmap(virtual_address, size);
             gmmu->MapSparse(virtual_address, size, use_big_pages);
+            ReleaseRemapPinsLocked(virtual_address, size);
         } else {
             auto handle{nvmap.GetHandle(entry.handle)};
-            if (!handle) {
+            const u64 buffer_offset = static_cast<u64>(entry.handle_offset_big_pages)
+                                      << vm.big_page_size_bits;
+            if (!handle || !handle->allocated || buffer_offset > handle->aligned_size ||
+                size > handle->aligned_size - buffer_offset) {
                 return NvResult::BadValue;
             }
 
-            DAddr base = nvmap.PinHandle(entry.handle, false);
+            const DAddr base = nvmap.PinHandle(entry.handle, false);
             if (base == 0) {
                 return NvResult::InsufficientMemory;
             }
-            DAddr device_address{static_cast<DAddr>(
-                base + (static_cast<u64>(entry.handle_offset_big_pages) << vm.big_page_size_bits))};
+            auto pin_guard = SCOPE_GUARD {
+                nvmap.UnpinHandle(entry.handle);
+            };
+            auto pin = std::make_shared<NvCore::NvMap::Handle::Id>(entry.handle);
+            const DAddr device_address = base + buffer_offset;
 
+            gmmu->Unmap(virtual_address, size);
             gmmu->Map(virtual_address, device_address, size,
                       static_cast<Tegra::PTEKind>(entry.kind), use_big_pages);
+            ReleaseRemapPinsLocked(virtual_address, size);
+            remapped_ranges.emplace(virtual_address, RemappedRange{size, std::move(pin)});
+            pin_guard.Cancel();
         }
     }
 
@@ -340,10 +389,22 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
                 return NvResult::BadValue;
             }
             const u64 relative_offset = static_cast<u64>(buffer_offset);
+            const u64 mapped_size = Common::AlignUp(size, VM::YUZU_PAGESIZE);
+            if (!Common::IsAligned(relative_offset, VM::YUZU_PAGESIZE) ||
+                mapped_size > mapping.size - relative_offset) {
+                LOG_WARNING(Service_NVDRV,
+                            "Cannot remap an unaligned or out-of-bounds GPU subregion: {:#X}",
+                            params.offset);
+                return NvResult::BadValue;
+            }
             const GPUVAddr gpu_address = mapping.offset + relative_offset;
             const DAddr device_address = mapping.ptr + relative_offset;
-            gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind(params.kind),
-                      mapping.big_page);
+            const bool use_big_pages = mapping.big_page &&
+                                       Common::IsAligned(gpu_address, vm.big_page_size) &&
+                                       Common::IsAligned(mapped_size, vm.big_page_size);
+            gmmu->Map(gpu_address, device_address, mapped_size, Tegra::PTEKind(params.kind),
+                      use_big_pages);
+            ReleaseRemapPinsLocked(gpu_address, mapped_size);
             return NvResult::Success;
         } else {
             LOG_WARNING(Service_NVDRV, "Cannot remap an unmapped GPU address space region: {:#X}",
@@ -438,6 +499,7 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
     }
     gmmu->Map(params.offset, device_address, mapped_size, static_cast<Tegra::PTEKind>(params.kind),
               use_big_pages);
+    ReleaseRemapPinsLocked(params.offset, mapped_size);
     if (allocation) {
         allocation->mappings.push_back(params.offset);
     }

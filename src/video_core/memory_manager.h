@@ -224,6 +224,9 @@ private:
     GPUVAddr BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size,
                             PTEKind kind);
 
+    void DemoteBigPage(GPUVAddr gpu_addr);
+    void DemoteBigPages(GPUVAddr gpu_addr, size_t size);
+
     template <bool is_big_page>
     inline EntryType GetEntry(size_t position) const;
 
