@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <random>
 #include <tuple>
@@ -74,8 +75,15 @@ public:
         return false;
     }
     void InvalidateGPUCache() override {}
-    void UnmapMemory(DAddr, u64) override {}
-    void ModifyGPUMemory(size_t, GPUVAddr, u64) override {}
+    void UnmapMemory(DAddr address, u64 size) override {
+        unmapped.emplace_back(address, size);
+    }
+    void ModifyGPUMemory(size_t id, GPUVAddr address, u64 size) override {
+        gpu_modified.emplace_back(id, address, size);
+        if (on_gpu_modified) {
+            on_gpu_modified(id, address, size);
+        }
+    }
     void FlushAndInvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
     void WaitForIdle() override {}
     void FragmentBarrier() override {}
@@ -89,6 +97,9 @@ public:
 
     std::vector<std::tuple<DAddr, u64, VideoCommon::CacheType>> flushed;
     std::vector<std::tuple<DAddr, u64, VideoCommon::CacheType>> invalidated;
+    std::vector<std::pair<DAddr, u64>> unmapped;
+    std::vector<std::tuple<size_t, GPUVAddr, u64>> gpu_modified;
+    std::function<void(size_t, GPUVAddr, u64)> on_gpu_modified;
 
 private:
     Null::AccelerateDMA dma;
@@ -101,9 +112,9 @@ std::unique_ptr<Core::System> CreateSystem() {
 }
 
 struct Memory {
-    explicit Memory(bool big_pages = true)
+    explicit Memory(bool big_pages = true, u64 big_page_bits = 16)
         : system{CreateSystem()}, process{system->Kernel()}, device{system->DeviceMemory()},
-          gpu{*system, device, 32} {
+          gpu{*system, device, 32, 0, big_page_bits} {
         device.BindInterface(&rasterizer);
         gpu.BindRasterizer(&rasterizer);
         auto& page_table = process.GetPageTable().GetImpl();
@@ -123,6 +134,8 @@ struct Memory {
         std::fill_n(system->DeviceMemory().GetPointerFromRaw<u8>(NEW_PHYSICAL), PAGE, 0x99);
         rasterizer.flushed.clear();
         rasterizer.invalidated.clear();
+        rasterizer.gpu_modified.clear();
+        rasterizer.unmapped.clear();
     }
 
     void UnmapPage(size_t index) {
@@ -251,31 +264,31 @@ TEST_CASE("Big sparse GPU regions hide stale small-page translations",
 
 TEST_CASE("Mixed GPU page operations match an independent page address model",
           "[gpu_memory][gpu_mixed_pages]") {
-    Memory memory;
-    constexpr size_t pages = 2 * BIG_PAGE / PAGE;
+    const u64 big_page_bits = GENERATE(12, 16, 17);
+    Memory memory{true, big_page_bits};
+    constexpr size_t pages = 4 * BIG_PAGE / PAGE;
     std::array<DAddr, pages> expected{};
-    memory.gpu.Map(GPU_BASE + BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    for (size_t i = 1; i < 4; ++i) {
+        memory.device.Map(DEVICE_BASE + i * BIG_PAGE, CPU_BASE, BIG_PAGE, memory.asid);
+    }
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE, 4 * BIG_PAGE, Tegra::PTEKind::INVALID, true);
     for (size_t i = 0; i < pages; ++i) {
-        expected[i] = DEVICE_BASE + (i % (BIG_PAGE / PAGE)) * PAGE;
+        expected[i] = DEVICE_BASE + i * PAGE;
     }
     std::mt19937 random{0xEDE032};
     for (size_t step = 0; step < 150; ++step) {
-        const size_t operation = random() % 5;
+        const size_t operation = random() % 3;
         size_t first = random() % pages;
         size_t count = 1 + random() % (pages - first);
-        const bool big = operation >= 3;
-        if (big) {
+        const bool big = (random() % 2) != 0;
+        if (big && (random() % 2) != 0) {
             first = (first / (BIG_PAGE / PAGE)) * (BIG_PAGE / PAGE);
-            count = BIG_PAGE / PAGE;
+            count = (1 + random() % (4 - first / (BIG_PAGE / PAGE))) * (BIG_PAGE / PAGE);
         }
         const GPUVAddr address = GPU_BASE + first * PAGE;
         const size_t size = count * PAGE;
-        if (operation == 0 || operation == 3) {
-            // Small mappings use contiguous backing within one device big page.
-            if (!big) {
-                count = std::min(count, BIG_PAGE / PAGE);
-            }
-            const size_t source = big ? 0 : random() % (BIG_PAGE / PAGE - count + 1);
+        if (operation == 0) {
+            const size_t source = random() % (pages - count + 1);
             memory.gpu.Map(address, DEVICE_BASE + source * PAGE, count * PAGE,
                            Tegra::PTEKind::INVALID, big);
             for (size_t i = 0; i < count; ++i) {
@@ -289,14 +302,15 @@ TEST_CASE("Mixed GPU page operations match an independent page address model",
             }
             std::fill_n(expected.begin() + first, count, DAddr{});
         }
-        INFO("step=" << step << " operation=" << operation << " first=" << first
-                     << " count=" << count);
+        INFO("step=" << step << " operation=" << operation << " first=" << first << " count="
+                     << count << " prefer_big=" << big << " big_page_bits=" << big_page_bits);
         for (size_t i = 0; i < pages; ++i) {
             const GPUVAddr current = GPU_BASE + i * PAGE;
             const auto actual = memory.gpu.GpuToCpuAddress(current);
             if (expected[i]) {
                 CHECK(actual == expected[i]);
-                const auto value = static_cast<u8>(((expected[i] - DEVICE_BASE) / PAGE + 1) * 0x11);
+                const auto value =
+                    static_cast<u8>((((expected[i] - DEVICE_BASE) % BIG_PAGE) / PAGE + 1) * 0x11);
                 CHECK(memory.Read(current, 1).front() == value);
             } else {
                 CHECK_FALSE(actual.has_value());
@@ -304,6 +318,198 @@ TEST_CASE("Mixed GPU page operations match an independent page address model",
             }
         }
     }
+}
+
+TEST_CASE("Short big-page requests preserve the remainder of the GPU page",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE + 7 * PAGE, PAGE, Tegra::PTEKind::INVALID, true);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE) == DEVICE_BASE + 7 * PAGE);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x88);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE) == DEVICE_BASE + PAGE);
+    CHECK(memory.Read(GPU_BASE + PAGE, 1).front() == 0x22);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE - PAGE, 1).front() == 0x10);
+}
+
+TEST_CASE("Offset big-page requests do not add the GPU page offset to the device address",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + PAGE, DEVICE_BASE + 7 * PAGE, PAGE, Tegra::PTEKind::INVALID, true);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE) == DEVICE_BASE + 7 * PAGE);
+    CHECK(memory.Read(GPU_BASE + PAGE, 1).front() == 0x88);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + 2 * PAGE, 1).front() == 0x33);
+}
+
+TEST_CASE("Big-page requests that cross a boundary cover the complete requested range",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    memory.gpu.Map(GPU_BASE + PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE) == DEVICE_BASE);
+    CHECK(memory.Read(GPU_BASE + PAGE, 1).front() == 0x11);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + BIG_PAGE) == DEVICE_BASE + BIG_PAGE - PAGE);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE, 1).front() == 0x10);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE + PAGE, 1).front() == 0x22);
+}
+
+TEST_CASE("Partial sparse big-page requests preserve neighboring mapped pages",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    memory.gpu.MapSparse(GPU_BASE + 3 * PAGE, PAGE, true);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + 4 * PAGE, 1).front() == 0x55);
+}
+
+TEST_CASE("Sparse big-page requests crossing a boundary clear only the requested pages",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + BIG_PAGE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    memory.gpu.MapSparse(GPU_BASE + BIG_PAGE - PAGE, 2 * PAGE, true);
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + BIG_PAGE - PAGE).has_value());
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + BIG_PAGE).has_value());
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x11);
+    CHECK(memory.Read(GPU_BASE + BIG_PAGE + PAGE, 1).front() == 0x22);
+}
+
+TEST_CASE("Physical GPU remapping notifies caches after installing the new address",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    const bool big = GENERATE(false, true);
+    Memory memory{big};
+    auto& cpu = memory.process.GetMemory();
+    cpu.MapMemoryRegion(memory.process.GetPageTable().GetImpl(), CPU_BASE + BIG_PAGE, BIG_PAGE,
+                        Core::DramMemoryMap::Base + NEW_PHYSICAL,
+                        Common::MemoryPermission::ReadWrite, false);
+    memory.device.Map(DEVICE_BASE + BIG_PAGE, CPU_BASE + BIG_PAGE, BIG_PAGE, memory.asid);
+    std::vector<DAddr> observed;
+    memory.rasterizer.on_gpu_modified = [&](size_t, GPUVAddr address, u64) {
+        observed.push_back(memory.gpu.GpuToCpuAddress(address).value_or(0));
+    };
+    const size_t size = big ? BIG_PAGE : PAGE;
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE + BIG_PAGE, size, Tegra::PTEKind::INVALID, big);
+    CHECK(memory.Read(GPU_BASE, 1).front() == 0x99);
+    CHECK(memory.rasterizer.gpu_modified ==
+          std::vector<std::tuple<size_t, GPUVAddr, u64>>{{memory.gpu.GetID(), GPU_BASE, size}});
+    CHECK(observed == std::vector<DAddr>{DEVICE_BASE + BIG_PAGE});
+    memory.rasterizer.gpu_modified.clear();
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE + BIG_PAGE, size, Tegra::PTEKind::INVALID, big);
+    CHECK(memory.rasterizer.gpu_modified.empty());
+}
+
+TEST_CASE("Equivalent page granularity changes preserve cached GPU mappings",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + 3 * PAGE, DEVICE_BASE + 3 * PAGE, PAGE, Tegra::PTEKind::INVALID,
+                   false);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * PAGE) == DEVICE_BASE + 3 * PAGE);
+    CHECK(memory.rasterizer.gpu_modified.empty());
+}
+
+TEST_CASE("Partial physical remapping invalidates only the affected GPU range",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory;
+    memory.gpu.Map(GPU_BASE + 3 * PAGE, DEVICE_BASE + PAGE, PAGE, Tegra::PTEKind::INVALID, false);
+    CHECK(memory.Read(GPU_BASE + 3 * PAGE, 1).front() == 0x22);
+    CHECK(memory.rasterizer.gpu_modified == std::vector<std::tuple<size_t, GPUVAddr, u64>>{
+                                                {memory.gpu.GetID(), GPU_BASE + 3 * PAGE, PAGE}});
+}
+
+TEST_CASE("Contiguous GPU remapping sends one cache range notification",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory{false};
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, false);
+    memory.rasterizer.gpu_modified.clear();
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE + PAGE, 3 * PAGE, Tegra::PTEKind::INVALID, false);
+    CHECK(memory.rasterizer.gpu_modified ==
+          std::vector<std::tuple<size_t, GPUVAddr, u64>>{{memory.gpu.GetID(), GPU_BASE, 3 * PAGE}});
+}
+
+TEST_CASE("Equivalent small-to-big GPU promotions preserve cached mappings",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory{false};
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    CHECK(memory.rasterizer.gpu_modified.empty());
+    CHECK(memory.Read(GPU_BASE + 7 * PAGE, 1).front() == 0x88);
+}
+
+TEST_CASE("Big GPU promotions notify only changed small-page runs",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory{false};
+    memory.gpu.Map(GPU_BASE + 3 * PAGE, DEVICE_BASE, 2 * PAGE, Tegra::PTEKind::INVALID, false);
+    memory.gpu.MapSparse(GPU_BASE + 9 * PAGE, PAGE, false);
+    memory.rasterizer.gpu_modified.clear();
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    CHECK(memory.rasterizer.gpu_modified == std::vector<std::tuple<size_t, GPUVAddr, u64>>{
+                                                {memory.gpu.GetID(), GPU_BASE + 3 * PAGE, 2 * PAGE},
+                                                {memory.gpu.GetID(), GPU_BASE + 9 * PAGE, PAGE}});
+}
+
+TEST_CASE("GPU unmap notifications expose no hidden stale small-page mappings",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory{false};
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE + PAGE, BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    memory.rasterizer.gpu_modified.clear();
+    memory.rasterizer.on_gpu_modified = [&](size_t, GPUVAddr address, u64 size) {
+        for (u64 offset = 0; offset < size; offset += PAGE) {
+            CHECK_FALSE(memory.gpu.GpuToCpuAddress(address + offset).has_value());
+        }
+    };
+    memory.gpu.Unmap(GPU_BASE, BIG_PAGE);
+    CHECK(memory.rasterizer.gpu_modified ==
+          std::vector<std::tuple<size_t, GPUVAddr, u64>>{{memory.gpu.GetID(), GPU_BASE, BIG_PAGE}});
+    memory.rasterizer.gpu_modified.clear();
+    memory.gpu.Unmap(GPU_BASE, BIG_PAGE);
+    CHECK(memory.rasterizer.gpu_modified.empty());
+}
+
+TEST_CASE("Partial preferred-big GPU mappings keep their full interior big pages",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    Memory memory;
+    for (size_t i = 1; i < 4; ++i) {
+        memory.device.Map(DEVICE_BASE + i * BIG_PAGE, CPU_BASE, BIG_PAGE, memory.asid);
+    }
+    memory.gpu.Map(GPU_BASE, DEVICE_BASE, 4 * BIG_PAGE, Tegra::PTEKind::INVALID, true);
+    memory.rasterizer.gpu_modified.clear();
+    memory.gpu.Map(GPU_BASE + PAGE, DEVICE_BASE + PAGE, 3 * BIG_PAGE, Tegra::PTEKind::INVALID,
+                   true);
+    CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + 3 * BIG_PAGE) == DEVICE_BASE + 3 * BIG_PAGE);
+    CHECK(memory.rasterizer.gpu_modified.empty());
+    memory.rasterizer.flushed.clear();
+    memory.Read(GPU_BASE, 4 * BIG_PAGE, true);
+    // Boundary big pages are demoted; both aligned interior big pages keep the
+    // original big-page access path and issue one flush each.
+    CHECK(memory.rasterizer.flushed.size() == 2 * (BIG_PAGE / PAGE) + 2);
+}
+
+TEST_CASE("Partial preferred-big GPU mappings include the final small-page coverage",
+          "[gpu_memory][gpu_partial_big_pages]") {
+    const bool sparse = GENERATE(false, true);
+    Memory memory;
+    if (sparse) {
+        memory.gpu.MapSparse(GPU_BASE, PAGE + 1, true);
+        CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE).has_value());
+    } else {
+        memory.gpu.Map(GPU_BASE, DEVICE_BASE + PAGE, PAGE + 1, Tegra::PTEKind::INVALID, true);
+        CHECK(memory.gpu.GpuToCpuAddress(GPU_BASE + PAGE) == DEVICE_BASE + 2 * PAGE);
+    }
+    CHECK(memory.Read(GPU_BASE + 2 * PAGE, 1).front() == 0x33);
+    CHECK(memory.rasterizer.gpu_modified ==
+          std::vector<std::tuple<size_t, GPUVAddr, u64>>{{memory.gpu.GetID(), GPU_BASE, 2 * PAGE}});
+}
+
+TEST_CASE("Partial GPU unmap invalidates the entire final small page",
+          "[gpu_memory][gpu_mapping_notifications]") {
+    Memory memory;
+    memory.gpu.Unmap(GPU_BASE, PAGE + 1);
+    CHECK(memory.rasterizer.unmapped ==
+          std::vector<std::pair<DAddr, u64>>{{DEVICE_BASE, 2 * PAGE}});
+    CHECK(memory.rasterizer.gpu_modified ==
+          std::vector<std::tuple<size_t, GPUVAddr, u64>>{{memory.gpu.GetID(), GPU_BASE, 2 * PAGE}});
+    CHECK_FALSE(memory.gpu.GpuToCpuAddress(GPU_BASE + 2 * PAGE - 1).has_value());
+    CHECK(memory.Read(GPU_BASE + 2 * PAGE, 1).front() == 0x33);
 }
 
 TEST_CASE("GPU block reads observe changed physical backing", "[gpu_memory]") {

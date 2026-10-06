@@ -94,55 +94,91 @@ PTEKind MemoryManager::GetPageKind(GPUVAddr gpu_addr) const {
     return kind_map.GetValueAt(gpu_addr);
 }
 
-template <MemoryManager::EntryType entry_type>
-GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size,
-                                    PTEKind kind) {
-    [[maybe_unused]] u64 remaining_size{size};
-    if constexpr (entry_type == EntryType::Mapped) {
+template <MemoryManager::EntryType entry_type, bool is_big_page>
+GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind) {
+    const u64 operation_page_size = is_big_page ? big_page_size : page_size;
+    if constexpr (entry_type == EntryType::Mapped && !is_big_page) {
         page_table.ReserveRange(gpu_addr, size);
     }
-    for (u64 offset{}; offset < size; offset += page_size) {
-        const GPUVAddr current_gpu_addr = gpu_addr + offset;
-        [[maybe_unused]] const auto current_entry_type = GetEntry<false>(current_gpu_addr);
-        SetEntry<false>(current_gpu_addr, entry_type);
-        if (current_entry_type != entry_type) {
-            rasterizer->ModifyGPUMemory(unique_identifier, current_gpu_addr, page_size);
-        }
-        if constexpr (entry_type == EntryType::Mapped) {
-            const DAddr current_dev_addr = dev_addr + offset;
-            const auto index = PageEntryIndex<false>(current_gpu_addr);
-            const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
-            page_table[index] = sub_value;
-        }
-        remaining_size -= page_size;
-    }
-    kind_map.Map(gpu_addr, gpu_addr + size, kind);
-    return gpu_addr;
-}
-
-template <MemoryManager::EntryType entry_type>
-GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr,
-                                       size_t size, PTEKind kind) {
-    [[maybe_unused]] u64 remaining_size{size};
-    for (u64 offset{}; offset < size; offset += big_page_size) {
-        const GPUVAddr current_gpu_addr = gpu_addr + offset;
-        [[maybe_unused]] const auto current_entry_type = GetEntry<true>(current_gpu_addr);
-        SetEntry<true>(current_gpu_addr, entry_type);
-        if (current_entry_type != entry_type) {
-            rasterizer->ModifyGPUMemory(unique_identifier, current_gpu_addr, big_page_size);
-        }
-        if constexpr (entry_type == EntryType::Mapped) {
-            const DAddr current_dev_addr = dev_addr + offset;
-            const auto index = PageEntryIndex<true>(current_gpu_addr);
-            const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
-            big_page_table_dev[index] = sub_value;
-        }
-        remaining_size -= big_page_size;
-    }
     {
-        std::unique_lock<std::mutex> lock(guard);
+        std::scoped_lock lock{guard};
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
     }
+
+    GPUVAddr changed_start{};
+    u64 changed_size{};
+    const auto flush = [&] {
+        if (changed_size != 0) {
+            rasterizer->ModifyGPUMemory(unique_identifier, changed_start, changed_size);
+            changed_size = 0;
+        }
+    };
+    const auto record_change = [&](GPUVAddr address, u64 coverage, bool changed) {
+        if (!changed) {
+            flush();
+            return;
+        }
+        if (changed_size == 0) {
+            changed_start = address;
+        } else if (address != changed_start + changed_size) {
+            flush();
+            changed_start = address;
+        }
+        changed_size += coverage;
+    };
+
+    for (u64 offset = 0; offset < size; offset += operation_page_size) {
+        const GPUVAddr address = gpu_addr + offset;
+        const auto old_entry = GetEntry<is_big_page>(address);
+        const auto index = PageEntryIndex<is_big_page>(address);
+        const u32 new_device_page = static_cast<u32>((dev_addr + offset) >> cpu_page_bits);
+        bool changed = old_entry != entry_type;
+        if constexpr (entry_type == EntryType::Mapped) {
+            if (old_entry == EntryType::Mapped) {
+                if constexpr (is_big_page) {
+                    changed |= big_page_table_dev[index] != new_device_page;
+                } else {
+                    changed |= page_table[index] != new_device_page;
+                }
+            }
+            if constexpr (is_big_page) {
+                big_page_table_dev[index] = new_device_page;
+            } else {
+                page_table[index] = new_device_page;
+            }
+        }
+        SetEntry<is_big_page>(address, entry_type);
+
+        if constexpr (is_big_page) {
+            // A free big entry exposes its small entries. Compare those effective
+            // mappings when promoting, and clear hidden entries before unmapping.
+            if (old_entry == EntryType::Free || entry_type == EntryType::Free) {
+                for (u64 sub_offset = 0; sub_offset < big_page_size; sub_offset += page_size) {
+                    const GPUVAddr small_address = address + sub_offset;
+                    const auto old_small_entry = GetEntry<false>(small_address);
+                    bool small_changed = old_small_entry != entry_type;
+                    if constexpr (entry_type == EntryType::Mapped) {
+                        if (old_small_entry == EntryType::Mapped) {
+                            small_changed |= page_table[PageEntryIndex<false>(small_address)] !=
+                                             new_device_page + (sub_offset >> cpu_page_bits);
+                        }
+                    }
+                    if constexpr (entry_type == EntryType::Free) {
+                        SetEntry<false>(small_address, EntryType::Free);
+                    }
+                    if (old_entry == EntryType::Free) {
+                        record_change(small_address, page_size, small_changed);
+                    }
+                }
+                if (old_entry == EntryType::Free) {
+                    continue;
+                }
+            }
+        }
+        // Publish only after the new address and entry state are visible.
+        record_change(address, operation_page_size, changed);
+    }
+    flush();
     return gpu_addr;
 }
 
@@ -172,7 +208,6 @@ void MemoryManager::DemoteBigPage(GPUVAddr gpu_addr) {
         }
     }
     SetEntry<true>(gpu_addr, EntryType::Free);
-    rasterizer->ModifyGPUMemory(unique_identifier, gpu_addr, big_page_size);
 }
 
 void MemoryManager::DemoteBigPages(GPUVAddr gpu_addr, size_t size) {
@@ -186,49 +221,60 @@ void MemoryManager::DemoteBigPages(GPUVAddr gpu_addr, size_t size) {
     }
 }
 
+template <MemoryManager::EntryType entry_type>
+GPUVAddr MemoryManager::MapRange(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind,
+                                 bool is_big_pages) {
+    if (size == 0) {
+        return gpu_addr;
+    }
+    // Requests describe page coverage, including a final partial small page.
+    size = Common::AlignUp(size, page_size);
+    // Equal page sizes use only the big-page address table (e.g. Host1x).
+    if (!is_big_pages && big_page_bits != page_bits) {
+        DemoteBigPages(gpu_addr, size);
+        return PageTableOp<entry_type, false>(gpu_addr, dev_addr, size, kind);
+    }
+
+    const GPUVAddr end = gpu_addr + size;
+    const GPUVAddr big_start = std::min(Common::AlignUp(gpu_addr, big_page_size), end);
+    const GPUVAddr big_end = Common::AlignDown(end, big_page_size);
+    if (gpu_addr < big_start) {
+        DemoteBigPage(Common::AlignDown(gpu_addr, big_page_size));
+        PageTableOp<entry_type, false>(gpu_addr, dev_addr, big_start - gpu_addr, kind);
+    }
+    if (big_start < big_end) {
+        PageTableOp<entry_type, true>(big_start, dev_addr + big_start - gpu_addr,
+                                      big_end - big_start, kind);
+    }
+    const GPUVAddr tail = std::max(big_start, big_end);
+    if (tail < end) {
+        DemoteBigPage(tail);
+        PageTableOp<entry_type, false>(tail, dev_addr + tail - gpu_addr, end - tail, kind);
+    }
+    return gpu_addr;
+}
+
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind,
                             bool is_big_pages) {
-    if (is_big_pages) [[likely]] {
-        return BigPageTableOp<EntryType::Mapped>(gpu_addr, dev_addr, size, kind);
-    }
-    DemoteBigPages(gpu_addr, size);
-    return PageTableOp<EntryType::Mapped>(gpu_addr, dev_addr, size, kind);
+    return MapRange<EntryType::Mapped>(gpu_addr, dev_addr, size, kind, is_big_pages);
 }
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
-    if (is_big_pages) [[likely]] {
-        return BigPageTableOp<EntryType::Reserved>(gpu_addr, 0, size, PTEKind::INVALID);
-    }
-    DemoteBigPages(gpu_addr, size);
-    return PageTableOp<EntryType::Reserved>(gpu_addr, 0, size, PTEKind::INVALID);
+    return MapRange<EntryType::Reserved>(gpu_addr, 0, size, PTEKind::INVALID, is_big_pages);
 }
 
 void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
     if (size == 0) {
         return;
     }
+    size = Common::AlignUp(size, page_size);
     GetSubmappedRangeImpl<false>(gpu_addr, size, page_stash);
 
     for (const auto& [map_addr, map_size] : page_stash) {
         rasterizer->UnmapMemory(map_addr, map_size);
     }
     page_stash.clear();
-
-    const GPUVAddr end = gpu_addr + size;
-    const GPUVAddr first = Common::AlignDown(gpu_addr, big_page_size);
-    if (gpu_addr != first) {
-        DemoteBigPage(first);
-    }
-    const GPUVAddr last = Common::AlignDown(end - 1, big_page_size);
-    if (!Common::IsAligned(end, big_page_size) && (last != first || gpu_addr == first)) {
-        DemoteBigPage(last);
-    }
-    const GPUVAddr full_start = Common::AlignUp(gpu_addr, big_page_size);
-    const GPUVAddr full_end = Common::AlignDown(end, big_page_size);
-    if (full_start < full_end) {
-        BigPageTableOp<EntryType::Free>(full_start, 0, full_end - full_start, PTEKind::INVALID);
-    }
-    PageTableOp<EntryType::Free>(gpu_addr, 0, size, PTEKind::INVALID);
+    MapRange<EntryType::Free>(gpu_addr, 0, size, PTEKind::INVALID, true);
 }
 
 std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr gpu_addr) const {

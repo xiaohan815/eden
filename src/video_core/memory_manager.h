@@ -216,13 +216,12 @@ private:
     std::vector<u64> entries;
     std::vector<u64> big_entries;
 
-    template <EntryType entry_type>
-    GPUVAddr PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size,
-                         PTEKind kind);
+    template <EntryType entry_type, bool is_big_page>
+    GPUVAddr PageTableOp(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind);
 
     template <EntryType entry_type>
-    GPUVAddr BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size,
-                            PTEKind kind);
+    GPUVAddr MapRange(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind,
+                      bool is_big_pages);
 
     void DemoteBigPage(GPUVAddr gpu_addr);
     void DemoteBigPages(GPUVAddr gpu_addr, size_t size);
