@@ -4662,6 +4662,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
 
+    // SDL pumps native macOS events from this timer. Stop it before closing so it cannot
+    // consume the Qt event dispatcher's wakeup while the application is exiting.
+    update_input_timer.stop();
+
     UpdateUISettings();
     game_list->SaveInterfaceLayout();
     UISettings::SaveWindowState();
@@ -4682,6 +4686,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     Network::Shutdown();
 
     QWidget::closeEvent(event);
+#ifdef __APPLE__
+    // Closing the main window must also finish the event loop if a child window remains.
+    QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+#endif
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event) {

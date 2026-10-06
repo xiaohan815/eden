@@ -16,9 +16,11 @@
 #include <queue>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
+#include "video_core/fence_completion.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
@@ -91,6 +93,9 @@ public:
             func();
         }
         fences.push(std::move(new_fence));
+        if constexpr (can_async_check) {
+            completion.Issue();
+        }
         if (should_flush) {
             rasterizer.FlushCommands();
         }
@@ -114,18 +119,17 @@ public:
             if (!force) {
                 return;
             }
-            std::mutex wait_mutex;
-            std::condition_variable wait_cv;
-            std::atomic<bool> wait_finished{};
-            std::function<void()> func([&] {
-                std::scoped_lock lk(wait_mutex);
-                wait_finished.store(true, std::memory_order_relaxed);
-                wait_cv.notify_all();
-            });
-            SignalFence(std::move(func));
-            std::unique_lock lk(wait_mutex);
-            wait_cv.wait(
-                lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
+            // Commit new flushes/callbacks if needed. Otherwise wait for the existing work,
+            // avoiding an extra stub fence and callback allocation.
+            if (!uncommitted_operations.empty() || ShouldFlush()) {
+                ++waits_committing_work;
+                SignalReference();
+            } else {
+                ++waits_reusing_work;
+                // Preserve the CPU-write synchronization performed by SignalFence.
+                rasterizer.InvalidateGPUCache();
+            }
+            completion.Wait(completion.Issued());
         }
     }
 
@@ -146,6 +150,8 @@ protected:
             fence_thread.request_stop();
             cv.notify_all();
             fence_thread.join();
+            LOG_INFO(Render, "GPU fence waits: {} existing batches, {} newly committed batches",
+                     waits_reusing_work, waits_committing_work);
         }
     }
 
@@ -221,6 +227,7 @@ private:
                 std::unique_lock lock(ring_guard);
                 delayed_destruction_ring.Push(std::move(current_fence));
             }
+            completion.Complete();
         }
     }
 
@@ -263,6 +270,10 @@ private:
     std::condition_variable cv;
 
     std::jthread fence_thread;
+
+    FenceCompletion completion;
+    u64 waits_reusing_work{};
+    u64 waits_committing_work{};
 
     DelayedDestructionRing<TFence, 8> delayed_destruction_ring;
 };

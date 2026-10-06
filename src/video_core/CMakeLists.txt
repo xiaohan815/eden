@@ -90,6 +90,7 @@ add_library(video_core STATIC
     macro.cpp
     macro.h
     fence_manager.h
+    fence_completion.h
     gpu.cpp
     gpu.h
     gpu_thread.cpp
