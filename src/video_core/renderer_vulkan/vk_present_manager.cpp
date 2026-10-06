@@ -172,6 +172,9 @@ void PresentManager::Present(Frame* frame) {
             present_queue.push_back(frame);
             frame_cv.notify_one();
         });
+        // Flush already queued the render submission. Dispatch the following present
+        // callback now instead of leaving it in a new chunk until the next GPU work.
+        scheduler.DispatchWork();
     } else {
         scheduler.WaitWorker();
         CopyToSwapchain(frame);

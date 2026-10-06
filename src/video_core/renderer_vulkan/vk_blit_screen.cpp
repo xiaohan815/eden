@@ -30,8 +30,9 @@ BlitScreen::BlitScreen(Tegra::MaxwellDeviceMemoryManager& device_memory_, const 
 BlitScreen::~BlitScreen() = default;
 
 void BlitScreen::WaitIdle() {
-    present_manager.WaitPresent();
     scheduler.Finish();
+    // Finish dispatches any present callbacks still held by the scheduler.
+    present_manager.WaitPresent();
     {
         std::scoped_lock lock{scheduler.submit_mutex};
         device.GetLogical().WaitIdle();

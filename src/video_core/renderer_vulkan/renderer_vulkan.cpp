@@ -173,6 +173,9 @@ try
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
     scheduler.Finish();
+    // Finish dispatches the present callbacks; drain them before the device idle wait
+    // so the present thread cannot submit more work while resources are destroyed.
+    present_manager.WaitPresent();
     {
         std::scoped_lock lock{scheduler.submit_mutex};
         void(device.GetLogical().WaitIdle());
