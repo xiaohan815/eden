@@ -112,8 +112,9 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
     const PerfStatsResults results{
         .system_fps = static_cast<double>(system_frames) / interval,
         .average_game_fps = (current_fps + previous_fps) / 2.0,
-        .frametime = duration_cast<DoubleSecs>(accumulated_frametime).count() /
-                     static_cast<double>(system_frames),
+        .frametime = system_frames > 0 ? duration_cast<DoubleSecs>(accumulated_frametime).count() /
+                                             static_cast<double>(system_frames)
+                                       : 0.0,
         .emulation_speed = system_us_per_second.count() / 1'000'000.0,
     };
 

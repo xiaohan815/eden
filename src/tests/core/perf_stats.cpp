@@ -93,3 +93,26 @@ TEST_CASE("Frame-time recording stops at its history capacity",
     CHECK(std::isfinite(samples.front()));
     CHECK(std::isfinite(samples.back()));
 }
+
+TEST_CASE("Frame-time statistics remain finite when no frames arrive", "[perf_stats]") {
+    auto stats = std::make_unique<Core::PerfStats>(0);
+
+    const auto startup = stats->GetAndResetStats(std::chrono::microseconds{0});
+    CHECK(std::isfinite(startup.frametime));
+    CHECK(startup.frametime == 0.0);
+    CHECK(startup.system_fps == 0.0);
+    CHECK(startup.average_game_fps == 0.0);
+
+    stats->BeginSystemFrame();
+    stats->EndSystemFrame();
+    stats->EndGameFrame();
+    const auto active = stats->GetAndResetStats(std::chrono::microseconds{1});
+    CHECK(std::isfinite(active.frametime));
+    CHECK(active.frametime >= 0.0);
+    CHECK(active.system_fps > 0.0);
+
+    const auto idle = stats->GetAndResetStats(std::chrono::microseconds{2});
+    CHECK(std::isfinite(idle.frametime));
+    CHECK(idle.frametime == 0.0);
+    CHECK(idle.system_fps == 0.0);
+}
