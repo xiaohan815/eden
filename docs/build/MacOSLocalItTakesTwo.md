@@ -151,6 +151,28 @@ present 请求。探针关联的是 scheduled 回调中发出呈现请求的命�
 AppKit 后台线程初始化断言；后者已通过限制类范围和检查已定义的方法修正。
 这些是诊断工具失败，未修改正式源码，也不计为正式应用的回归。
 
+### 实际绘制批次探针准备
+
+核对 MoltenVK 1.4.1 的 `MVKQueuePresentSurfaceSubmission::execute` 后确认，
+呈现有独立的 Metal 命令缓冲，前述接近零的执行时间不能代表绘制工作。
+新的临时探针在实际 command-buffer 类的 commit 前注册 scheduled/completed
+回调，记录队列、唯一提交编号、原始 GPU 时间和 MoltenVK 批次标签，再与
+drawable 呈现请求对应；包装层的重复 commit 调用只记录一次。
+
+Mac 随后锁屏，不能通过 UI 进入关卡。本轮仅验证探针：一次无输入启动记录
+20,196 个已完成的批次，其中 16,435 个为 vkQueueSubmit、1,878 个为
+vkQueuePresentKHR，另有获取图像和等待空闲的批次。所有提交编号唯一，GPU
+时间非零且顺序有效，1,878 个呈现请求均找到对应提交，无记录溢出，退出码为 0。
+原始 presentedTime 全部为零，所以这些数据不用于评价屏幕节奏或关卡性能。
+同队列相邻呈现之间的批次分组也不等于完整的每帧资源依赖图。
+
+此前一次运行因独立测试配置保留退出确认而在 SIGTERM 后停留于确认对话框；
+线程采样已定位该对话框，结束测试进程后仅在独立 TAS 配置设置 Ask_Never。
+后一次 SIGTERM 已正常完成清理。正式双手柄配置的 SHA-256 在本轮前后相同。
+探针与分析脚本位于 `.cache/diagnostics/metal-render-probe.mm`、
+`analyze-metal-render.py`，验证记录为 `raw-metal-render-startup-lock-*`。
+解锁后需用同一镜头轨迹重新取得非零的实际显示时间，再评估绘制完成与显示等待。
+
 ### 异步呈现的命令派发与等待顺序
 
 `PresentManager::Present` 原先将呈现通知记入新的命令块，直到后续 GPU 工作
