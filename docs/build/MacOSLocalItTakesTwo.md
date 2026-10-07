@@ -269,6 +269,19 @@ MoltenVK 在提交编码时才取得 Metal drawable；源码第一次等待之�
 资源完成等待和提交锁等待，因此第二次将显示时钟等待推迟到提交锁之后。
 这个位置也会延长 Vulkan 提交锁的持有时间，仍需比较渲染提交是否受阻。
 
+进一步逐 drawable 对齐请求、呈现关联命令的 GPU 完成时间与实际显示时间：
+提交位置 20 ms 短测的 79 个超过 37.5 ms 的显示间隔，其请求间隔和
+呈现关联命令完成间隔全部处于 33.333 ms ± 2 ms 内；关联命令 GPU 完成
+到实际显示的等待比前一帧增加的中位数为 8.164 ms。
+79 个长间隔中，72 个紧接着出现小于 29 ms 的短间隔，无连续长间隔。
+临时动态库长测的 13 个长间隔也有同类特征，且全部立即接短间隔。
+这说明在这些记录里，提交和关联命令完成节奏稳定之后仍存在显示等待
+波动；不能据此把原因归到特定驱动或合成器，也不能把关联命令时间视为
+完整每帧 GPU 工作。下一次应使用已有 native clock probe 同时记录正式
+实现的 display link 与实际显示，先验证 19 ms 相位，再决定是否保留。
+分析脚本和结果位于 `.cache/diagnostics/analyze-display-jitter-attribution.py`
+及 `.cache/diagnostics/display-jitter-attribution.json`。
+
 实验分支加入显式开关 `EDEN_MACOS_DISPLAY_PACING=1`，默认关闭。
 启用后，只有 MoltenVK、异步呈现、FIFO、30 FPS 帧节奏、标准速度 100%、
 macOS 14+、可见窗口且显示时钟报告 120 Hz 的情况下才采用固定相位。
