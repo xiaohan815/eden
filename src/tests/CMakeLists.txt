@@ -23,6 +23,7 @@ add_executable(tests
     core/perf_stats.cpp
     core/internal_network/network.cpp
     video_core/memory_budget.cpp
+    video_core/display_pacing.cpp
     video_core/gpu_memory.cpp
     video_core/fence_completion.cpp
     video_core/geometry_layer_passthrough.cpp

@@ -34,7 +34,11 @@ public:
     [[nodiscard]] bool Create(VkSurfaceKHR_T* surface, u32 width, u32 height);
 
     /// Acquires the next image in the swapchain, waits as needed.
-    bool AcquireNextImage();
+    bool AcquireNextImage(bool display_paced = false);
+
+    VkPresentModeKHR GetPresentMode() const {
+        return present_mode;
+    }
 
     /// Presents the rendered image; returns false when the surface must be replaced.
     [[nodiscard]] bool Present(VkSemaphore render_semaphore);

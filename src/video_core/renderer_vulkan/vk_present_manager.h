@@ -7,6 +7,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <boost/container/deque.hpp>
 
@@ -24,6 +25,9 @@ namespace Vulkan {
 class Device;
 class Scheduler;
 class Swapchain;
+#ifdef __APPLE__
+class MacOSDisplayPacer;
+#endif
 
 struct Frame {
     u32 width;
@@ -76,7 +80,8 @@ private:
 
     void DiscardFrame(Frame* frame);
 
-    void SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info);
+    void SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info,
+                     bool display_pacing_planned = false);
 
     void SetImageCount();
 
@@ -97,6 +102,10 @@ private:
     std::mutex swapchain_mutex;
     std::mutex queue_mutex;
     std::mutex free_mutex;
+#ifdef __APPLE__
+    // Declared before present_thread so the worker joins before clock teardown.
+    std::unique_ptr<MacOSDisplayPacer> macos_display_pacer;
+#endif
     std::jthread present_thread;
     const VkFormat frame_image_format;
     bool blit_supported;

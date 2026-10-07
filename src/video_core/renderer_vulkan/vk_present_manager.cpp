@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <string_view>
 
 #include "common/settings.h"
 #include "common/thread.h"
@@ -16,10 +18,24 @@
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+#ifdef __APPLE__
+#include "video_core/renderer_vulkan/macos_display_pacer.h"
+#endif
+
 namespace Vulkan {
 
 
 namespace {
+
+#ifdef __APPLE__
+bool UseDisplayPacing(const Swapchain& swapchain) {
+    return Settings::values.frame_pacing_mode.GetValue() == Settings::FramePacingMode::Target_30 &&
+           Settings::values.use_speed_limit.GetValue() &&
+           Settings::values.current_speed_mode.GetValue() == Settings::SpeedMode::Standard &&
+           Settings::values.speed_limit.GetValue() == 100 &&
+           swapchain.GetPresentMode() == VK_PRESENT_MODE_FIFO_KHR;
+}
+#endif
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice& physical_device, VkFormat format) {
     const VkFormatProperties props{physical_device.GetFormatProperties(format)};
@@ -136,6 +152,14 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     }
 
     if (use_present_thread) {
+#ifdef __APPLE__
+        const char* display_pacing = std::getenv("EDEN_MACOS_DISPLAY_PACING");
+        const auto& wsi = render_window.GetWindowInfo();
+        if (display_pacing && std::string_view{display_pacing} == "1" && device.IsMoltenVK() &&
+            wsi.type == Core::Frontend::WindowSystemType::Cocoa && wsi.render_surface) {
+            macos_display_pacer = std::make_unique<MacOSDisplayPacer>(wsi.render_surface);
+        }
+#endif
         present_thread = std::jthread([this](std::stop_token token) { PresentThread(token); });
     }
 }
@@ -336,10 +360,19 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
     }
 
-    if (swapchain.AcquireNextImage()) {
+    bool display_pacing_planned = false;
+    const auto acquire = [this, &display_pacing_planned] {
+#ifdef __APPLE__
+        if (macos_display_pacer) {
+            display_pacing_planned = macos_display_pacer->IsReady(UseDisplayPacing(swapchain));
+        }
+#endif
+        return swapchain.AcquireNextImage(display_pacing_planned);
+    };
+    if (acquire()) {
         // A surface can remain out of date after recreation. Retry only once so
         // the presentation queue and shutdown can continue to make progress.
-        if (!RecreateSwapchain(frame) || swapchain.AcquireNextImage()) {
+        if (!RecreateSwapchain(frame) || acquire()) {
             return DiscardFrame(frame);
         }
     }
@@ -471,7 +504,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         .pSignalSemaphores = &render_semaphore,
     };
 
-    SubmitFrame(frame, submit_info);
+    SubmitFrame(frame, submit_info, display_pacing_planned);
 
     // Present
     // The copy submission already consumed render_ready and owns present_done.
@@ -501,8 +534,20 @@ void PresentManager::DiscardFrame(Frame* frame) {
     SubmitFrame(frame, submit_info);
 }
 
-void PresentManager::SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info) {
+void PresentManager::SubmitFrame(Frame* frame, const VkSubmitInfo& submit_info,
+                                  bool display_pacing_planned) {
     std::scoped_lock submit_lock{scheduler.submit_mutex};
+#ifdef __APPLE__
+    if (display_pacing_planned && !macos_display_pacer->Wait(UseDisplayPacing(swapchain))) {
+        // The clock can disappear between image acquisition and submission.
+        // GPU resource waits already ran; supply only the deferred CPU delay.
+        if (UseDisplayPacing(swapchain)) {
+            scheduler.Wait(0, 30.0);
+        }
+    }
+#else
+    (void)display_pacing_planned;
+#endif
     switch (const VkResult result =
                 device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
     case VK_SUCCESS:

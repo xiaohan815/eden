@@ -156,7 +156,7 @@ bool Swapchain::Create(VkSurfaceKHR_T* surface_, u32 width_, u32 height_) {
     return true;
 }
 
-bool Swapchain::AcquireNextImage() {
+bool Swapchain::AcquireNextImage(bool display_paced) {
     if (!swapchain) {
         is_outdated = true;
         return true;
@@ -179,24 +179,30 @@ bool Swapchain::AcquireNextImage() {
         break;
     }
 
-    const auto wait_with_frame_pacing = [this] {
-    switch (Settings::values.frame_pacing_mode.GetValue()) {
-    case Settings::FramePacingMode::Target_Auto:
-        scheduler.Wait(resource_ticks[image_index]);
-        break;
-    case Settings::FramePacingMode::Target_30:
-        scheduler.Wait(resource_ticks[image_index], 30.0);
-        break;
-    case Settings::FramePacingMode::Target_60:
-        scheduler.Wait(resource_ticks[image_index], 60.0);
-        break;
-    case Settings::FramePacingMode::Target_90:
-        scheduler.Wait(resource_ticks[image_index], 90.0);
-        break;
-    case Settings::FramePacingMode::Target_120:
-        scheduler.Wait(resource_ticks[image_index], 120.0);
-        break;
-    }
+    const auto wait_with_frame_pacing = [this, display_paced] {
+        if (display_paced) {
+            // Defer the macOS display-clock delay to the copy submission, after
+            // these image-resource waits. Do not apply a second CPU delay here.
+            scheduler.Wait(resource_ticks[image_index]);
+            return;
+        }
+        switch (Settings::values.frame_pacing_mode.GetValue()) {
+        case Settings::FramePacingMode::Target_Auto:
+            scheduler.Wait(resource_ticks[image_index]);
+            break;
+        case Settings::FramePacingMode::Target_30:
+            scheduler.Wait(resource_ticks[image_index], 30.0);
+            break;
+        case Settings::FramePacingMode::Target_60:
+            scheduler.Wait(resource_ticks[image_index], 60.0);
+            break;
+        case Settings::FramePacingMode::Target_90:
+            scheduler.Wait(resource_ticks[image_index], 90.0);
+            break;
+        case Settings::FramePacingMode::Target_120:
+            scheduler.Wait(resource_ticks[image_index], 120.0);
+            break;
+        }
     };
 
 #ifdef __ANDROID__
