@@ -410,6 +410,22 @@ if (APPLE)
         MACOSX_PACKAGE_LOCATION Frameworks
         XCODE_FILE_ATTRIBUTES "CodeSignOnCopy")
     target_sources(yuzu PRIVATE ${MOLTENVK_LIBRARY})
+
+    option(YUZU_MACOS_ADHOC_SIGN "Ad-hoc sign the local macOS app bundle" OFF)
+    if (YUZU_MACOS_ADHOC_SIGN AND NOT CMAKE_GENERATOR MATCHES "Xcode")
+        find_program(YUZU_CODESIGN_EXECUTABLE codesign REQUIRED)
+        # The linker's signature covers the executable, but does not seal the app resources.
+        # Sign the complete bundle after linking so local rebuilds remain valid app bundles.
+        set_property(TARGET yuzu APPEND PROPERTY LINK_DEPENDS
+            ${_icons} "${MOLTENVK_LIBRARY}" "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist")
+        add_custom_command(TARGET yuzu POST_BUILD
+            COMMAND "${YUZU_CODESIGN_EXECUTABLE}" --force --sign - --timestamp=none
+                "$<TARGET_BUNDLE_DIR:yuzu>"
+            COMMAND "${YUZU_CODESIGN_EXECUTABLE}" --verify --deep --strict --verbose=2
+                "$<TARGET_BUNDLE_DIR:yuzu>"
+            COMMENT "Signing and verifying the local macOS app bundle"
+            VERBATIM)
+    endif()
 elseif(WIN32)
     # compile as a win32 gui application instead of a console application
     target_link_libraries(yuzu PRIVATE Qt6::EntryPointPrivate)
