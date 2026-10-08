@@ -15,6 +15,7 @@
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
+#include "video_core/renderer_vulkan/gpu_completion.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -35,7 +36,7 @@ public:
 
     /// Returns the last known GPU tick.
     [[nodiscard]] u64 KnownGpuTick() const noexcept {
-        return gpu_tick.load(std::memory_order_acquire);
+        return gpu_tick.Value();
     }
 
     /// Returns true when a tick has been hit by the GPU.
@@ -73,7 +74,7 @@ private:
 private:
     const Device& device;             ///< Device.
     vk::Semaphore semaphore;          ///< Timeline semaphore.
-    std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
+    GpuCompletion gpu_tick;           ///< Current known GPU tick.
     std::atomic<u64> current_tick{1}; ///< Current logical tick.
     std::mutex wait_mutex;
     std::mutex free_mutex;

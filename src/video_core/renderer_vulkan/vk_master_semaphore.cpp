@@ -66,30 +66,12 @@ void MasterSemaphore::Refresh() {
         return;
     }
 
-    u64 this_tick{};
-    u64 counter{};
-    do {
-        this_tick = gpu_tick.load(std::memory_order_acquire);
-        counter = semaphore.GetCounter();
-        if (counter < this_tick) {
-            return;
-        }
-    } while (!gpu_tick.compare_exchange_weak(this_tick, counter, std::memory_order_release,
-                                             std::memory_order_relaxed));
+    gpu_tick.Refresh(semaphore.GetCounter());
 }
 
 void MasterSemaphore::Wait(u64 tick) {
     if (!semaphore) {
-        // Fast check: already reached the requested tick?
-        if (gpu_tick.load(std::memory_order_acquire) >= tick) {
-            return;
-        }
-
-        u64 last_tick = gpu_tick.load(std::memory_order_relaxed);
-        while (gpu_tick.load(std::memory_order_acquire) < tick) {
-            gpu_tick.wait(last_tick, std::memory_order_acquire);
-            last_tick = gpu_tick.load(std::memory_order_relaxed);
-        }
+        gpu_tick.Wait(tick);
         return;
     }
 
@@ -229,9 +211,8 @@ void MasterSemaphore::WaitThread(std::stop_token token) {
         {
             std::scoped_lock lock{free_mutex};
             free_queue.push_front(std::move(fence));
-            gpu_tick.store(host_tick, std::memory_order_release);
         }
-        gpu_tick.notify_one();
+        gpu_tick.Refresh(host_tick);
     }
 }
 
