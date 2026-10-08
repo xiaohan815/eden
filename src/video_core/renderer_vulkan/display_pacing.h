@@ -11,7 +11,7 @@
 namespace Vulkan::DisplayPacing {
 
 constexpr u64 Period = 33'333'333;
-constexpr u64 Phase = 19'000'000;
+constexpr u64 Phase = 20'000'000;
 constexpr u64 ClockTimeout = 100'000'000;
 
 /// Only advance to the next display-clock slot; never replay missed slots or
