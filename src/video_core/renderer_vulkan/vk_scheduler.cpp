@@ -300,6 +300,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     });
     chunk->MarkSubmit();
     DispatchWork();
+    has_pending_commands = false;
     return signal_value;
 }
 

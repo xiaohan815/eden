@@ -56,6 +56,11 @@ public:
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
 
+    /// Includes recorded commands already dispatched to the worker but not yet submitted.
+    [[nodiscard]] bool HasPendingCommands() const noexcept {
+        return has_pending_commands;
+    }
+
     /// Requests to begin a renderpass.
     void RequestRenderpass(const Framebuffer* framebuffer);
 
@@ -91,6 +96,7 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        has_pending_commands = true;
         if (chunk->Record(command)) {
             return;
         }
@@ -166,6 +172,9 @@ public:
     std::mutex submit_mutex;
 
 private:
+    // Producer-thread state; DispatchWork alone does not submit the command buffer.
+    bool has_pending_commands{};
+
     class Command {
     public:
         virtual ~Command() = default;

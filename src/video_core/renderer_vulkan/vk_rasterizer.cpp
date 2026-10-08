@@ -842,7 +842,11 @@ void RasterizerVulkan::FlushCommands() {
         return;
     }
     draw_counter = 0;
-    scheduler.Flush();
+    // Queueing a non-stub fence already submits the recorded commands. The generic
+    // fence path can then ask us to flush again without any intervening work.
+    if (scheduler.HasPendingCommands()) {
+        scheduler.Flush();
+    }
 }
 
 void RasterizerVulkan::TickFrame() {
