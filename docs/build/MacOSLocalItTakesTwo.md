@@ -369,6 +369,9 @@ P99 为 41.666542 ms，最大为 208.332458 ms，不能把镜头回放的改善
 `MACOSX_BUNDLE_EXECUTABLE_NAME`，并将 XML 声明置于文件首行。
 重新配置和构建后，生成的字段为 `eden`，指向实际存在的可执行文件，
 plist 解析及 macOS 应用包打开检查通过。该修改不改变渲染路径。
+新构建随后通过正式配置启动，已核对中文游戏列表。启动时应用重新保存了
+`UI/Shortcuts` 的默认标记及 Renderdoc 快捷键 context；Renderer、Controls、
+Core、Cpu、System、语言、单独游戏配置和窗口状态均未改变。
 
 ### 异步呈现的命令派发与等待顺序
 
